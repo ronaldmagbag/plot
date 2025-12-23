@@ -61,6 +61,7 @@ class PropertyLine(BaseModel):
     source: str = "openstreetmap"
     source_date: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
     accuracy_m: float = 2.0
+    segments: Optional[Dict[str, Any]] = None  # Front, rear, left_side, right_side segments with colors
 
 
 class SetbackLine(BaseModel):

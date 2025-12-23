@@ -191,11 +191,61 @@ class PlotAnalysisPipeline:
         # Mapbox imagery and SAM3 segmentation
         sam3_results = None
         if self.cache_dir:
-            logger.info("Downloading Mapbox satellite imagery for SAM3 segmentation...")
-            try:
-                merged_image, imagery_metadata = self.mapbox_imagery_collector.download_imagery(
-                    lat, lon, radius_m=context_radius
-                )
+            # Check if SAM3 results already exist
+            sam3_output_path = Path(self.cache_dir) / f"sam3_results_{lat:.6f}_{lon:.6f}.json"
+            if sam3_output_path.exists():
+                logger.info(f"Loading existing SAM3 results from {sam3_output_path.name}...")
+                try:
+                    with open(sam3_output_path, "r") as f:
+                        sam3_results = json.load(f)
+                    logger.info(f"SAM3 found: {len(sam3_results.get('roads', []))} roads, "
+                              f"{len(sam3_results.get('trees', []))} trees, "
+                              f"{len(sam3_results.get('grasses', []))} grasses")
+                except Exception as e:
+                    logger.warning(f"Failed to load existing SAM3 results: {e}, will regenerate")
+                    sam3_results = None
+            
+            # If SAM3 results don't exist, check for cached imagery and run segmentation
+            if sam3_results is None:
+                # Check if merged image already exists in cache
+                zoom = self.config.api.mapbox_max_zoom
+                cached_image_pattern = f"mapbox_merged_{lat:.6f}_{lon:.6f}_{context_radius}m_z{zoom}.jpg"
+                cached_images = list(Path(self.cache_dir).glob(cached_image_pattern))
+                
+                merged_image = None
+                imagery_metadata = None
+                
+                if cached_images:
+                    logger.info(f"Found cached merged image: {cached_images[0].name}, skipping download")
+                    try:
+                        from PIL import Image
+                        merged_image = Image.open(cached_images[0])
+                        # Reconstruct metadata from filename and config
+                        imagery_metadata = {
+                            "bounds": {
+                                "west": lon - context_radius / 111000 / abs(math.cos(math.radians(lat))),
+                                "east": lon + context_radius / 111000 / abs(math.cos(math.radians(lat))),
+                                "south": lat - context_radius / 111000,
+                                "north": lat + context_radius / 111000
+                            },
+                            "zoom": zoom,
+                            "center": [lon, lat],
+                            "radius_m": context_radius
+                        }
+                    except Exception as e:
+                        logger.warning(f"Failed to load cached image: {e}, will re-download")
+                        cached_images = []
+                
+                if not cached_images:
+                    logger.info("Downloading Mapbox satellite imagery for SAM3 segmentation...")
+                    try:
+                        merged_image, imagery_metadata = self.mapbox_imagery_collector.download_imagery(
+                            lat, lon, radius_m=context_radius
+                        )
+                    except Exception as e:
+                        logger.warning(f"Mapbox imagery download failed: {e}")
+                        merged_image = None
+                        imagery_metadata = None
                 
                 if merged_image and imagery_metadata:
                     logger.info("Running SAM3 segmentation...")
@@ -206,8 +256,8 @@ class PlotAnalysisPipeline:
                         logger.info(f"SAM3 found: {len(sam3_results.get('roads', []))} roads, "
                                   f"{len(sam3_results.get('trees', []))} trees, "
                                   f"{len(sam3_results.get('grasses', []))} grasses")
-            except Exception as e:
-                logger.warning(f"SAM3 segmentation failed: {e}, continuing without it")
+                elif not merged_image:
+                    logger.warning("No imagery available for SAM3 segmentation, skipping")
         
         # ============================================================
         # STAGE 3: Analysis
@@ -246,19 +296,63 @@ class PlotAnalysisPipeline:
         # Preliminary adjacency for setback calculation
         preliminary_adjacency = self._quick_adjacency(property_coords, osm_roads)
         
-        # Calculate setbacks
-        setback_result = self.setback_calculator.calculate_setbacks(
-            property_coords, preliminary_adjacency
+        # Get property line with classification using new boundary collector
+        property_line_obj = self.boundary_collector.get_property_line(
+            lat, lon, radius,
+            osm_buildings=osm_buildings,
+            osm_roads=osm_roads,
+            osm_landuse=osm_landuse_preview,
+            classify=True
         )
-        setback_coords = setback_result["coordinates"][0] if setback_result else property_coords
         
-        # Calculate buildable envelope (pass neighbor buildings for constraint checking)
-        buildable_result = self.setback_calculator.calculate_buildable_envelope(
-            setback_coords, 
-            constraints=[],
-            property_area_sqm=property_area,
-            neighbor_buildings=neighbor_buildings
-        )
+        # If we got a property line object, use it; otherwise fall back to old method
+        if property_line_obj:
+            # Use new boundary collector methods
+            setback_line_obj = self.boundary_collector.get_setback_line(property_line_obj)
+            buildable_envelope_obj = self.boundary_collector.get_buildable_envelope(
+                property_line_obj, setback_line_obj
+            )
+            
+            # Convert to old format for compatibility
+            if setback_line_obj:
+                setback_result = {
+                    "coordinates": [setback_line_obj.coordinates],
+                    "area_sqm": setback_line_obj.area_sqm,
+                    "setbacks_applied": {
+                        "front_m": setback_line_obj.metadata.get("front_rear_setback_m", 4.0),
+                        "rear_m": setback_line_obj.metadata.get("front_rear_setback_m", 4.0),
+                        "side_east_m": setback_line_obj.metadata.get("side_setback_m", 1.0),
+                        "side_west_m": setback_line_obj.metadata.get("side_setback_m", 1.0)
+                    },
+                    "regulation_source": "uk_planning_guidance"
+                }
+                setback_coords = setback_line_obj.coordinates
+            else:
+                setback_result = None
+                setback_coords = property_coords
+            
+            if buildable_envelope_obj:
+                buildable_result = {
+                    "coordinates": [buildable_envelope_obj.coordinates],
+                    "area_sqm": buildable_envelope_obj.area_sqm,
+                    "constraints_applied": []
+                }
+            else:
+                buildable_result = None
+        else:
+            # Fallback to old method
+            setback_result = self.setback_calculator.calculate_setbacks(
+                property_coords, preliminary_adjacency
+            )
+            setback_coords = setback_result["coordinates"][0] if setback_result else property_coords
+            
+            # Calculate buildable envelope (pass neighbor buildings for constraint checking)
+            buildable_result = self.setback_calculator.calculate_buildable_envelope(
+                setback_coords, 
+                constraints=[],
+                property_area_sqm=property_area,
+                neighbor_buildings=neighbor_buildings
+            )
         
         # Full adjacency analysis
         adjacency_result = self.adjacency_analyzer.analyze(
@@ -281,7 +375,8 @@ class PlotAnalysisPipeline:
         # Boundaries
         boundaries = self._build_boundaries(
             property_coords, property_area, property_perimeter,
-            setback_result, buildable_result, boundary_data
+            setback_result, buildable_result, boundary_data,
+            property_line_obj  # Pass property line object for segments
         )
         
         # Surrounding context (use filtered neighbor_buildings, not all osm_buildings)
@@ -512,11 +607,12 @@ class PlotAnalysisPipeline:
         property_perimeter: float,
         setback_result: Dict[str, Any],
         buildable_result: Dict[str, Any],
-        boundary_data: Dict[str, Any]
+        boundary_data: Dict[str, Any],
+        property_line_obj: Optional[Any] = None
     ) -> Boundaries:
         """Build Boundaries model from collected data"""
         
-        # Property line
+        # Property line - include segments if available
         property_line = PropertyLine(
             coordinates=[property_coords],
             area_sqm=round(property_area, 1),
@@ -525,6 +621,44 @@ class PlotAnalysisPipeline:
             source_date=datetime.utcnow().isoformat(),
             accuracy_m=boundary_data.get("accuracy_m", 5.0)
         )
+        
+        # Add segments if property_line_obj has them
+        segments_data = None
+        if property_line_obj and hasattr(property_line_obj, 'front'):
+            # Store segment information for visualization
+            # Store edge indices instead of coordinates to avoid duplication
+            segments_data = {}
+            
+            if property_line_obj.front:
+                segments_data["front"] = {
+                    "edges": property_line_obj.front.edge_indices,
+                    "length_m": property_line_obj.front.length_m,
+                    "color": property_line_obj.front.color
+                }
+            if property_line_obj.rear:
+                segments_data["rear"] = {
+                    "edges": property_line_obj.rear.edge_indices,
+                    "length_m": property_line_obj.rear.length_m,
+                    "color": property_line_obj.rear.color
+                }
+            if property_line_obj.left_side:
+                segments_data["left_side"] = {
+                    "edges": property_line_obj.left_side.edge_indices,
+                    "length_m": property_line_obj.left_side.length_m,
+                    "color": property_line_obj.left_side.color
+                }
+            if property_line_obj.right_side:
+                segments_data["right_side"] = {
+                    "edges": property_line_obj.right_side.edge_indices,
+                    "length_m": property_line_obj.right_side.length_m,
+                    "color": property_line_obj.right_side.color
+                }
+        
+        # Update property_line with segments (using model_dump and update)
+        if segments_data:
+            property_line_dict = property_line.model_dump()
+            property_line_dict["segments"] = segments_data
+            property_line = PropertyLine(**property_line_dict)
         
         # Setback line
         setback_coords = setback_result["coordinates"] if setback_result else [property_coords]

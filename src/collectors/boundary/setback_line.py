@@ -126,19 +126,39 @@ class SetbackLineProcessor:
             # This ensures front/rear are correct, sides will be conservative
             setback_deg = self.front_rear_setback_m / m_per_deg
             
-            # Buffer inward
-            buffered = prop_poly.buffer(-setback_deg, cap_style=2, join_style=2)
+            # Ensure polygon is valid and has correct orientation
+            if not prop_poly.is_valid:
+                # Try to fix invalid polygon
+                prop_poly = prop_poly.buffer(0)
+            
+            # Buffer inward (negative value shrinks the polygon)
+            # Use resolution parameter for better accuracy
+            buffered = prop_poly.buffer(-setback_deg, cap_style=2, join_style=2, resolution=16)
+            
+            # Handle case where buffer creates empty or invalid geometry
+            if not isinstance(buffered, Polygon):
+                logger.warning(f"Buffer returned non-polygon: {type(buffered)}")
+                # Try with smaller buffer
+                setback_deg = self.side_setback_m / m_per_deg
+                buffered = prop_poly.buffer(-setback_deg, cap_style=2, join_style=2, resolution=16)
             
             if not isinstance(buffered, Polygon) or not buffered.is_valid:
-                # Try with smaller buffer if it fails
-                setback_deg = self.side_setback_m / m_per_deg
-                buffered = prop_poly.buffer(-setback_deg, cap_style=2, join_style=2)
-                
-                if not isinstance(buffered, Polygon) or not buffered.is_valid:
-                    logger.warning("Buffer failed")
-                    return None
+                logger.warning("Setback buffer failed - returning None")
+                return None
             
-            return [[c[0], c[1]] for c in buffered.exterior.coords]
+            # Verify the buffered polygon is actually smaller (inside property)
+            if buffered.area >= prop_poly.area:
+                logger.warning(f"Setback buffer failed - buffered area ({buffered.area}) >= property area ({prop_poly.area})")
+                # This shouldn't happen with negative buffer, but if it does, return None
+                return None
+            
+            # Extract coordinates and ensure they're in correct format
+            coords = list(buffered.exterior.coords)
+            # Remove duplicate closing point if present
+            if len(coords) > 1 and coords[0] == coords[-1]:
+                coords = coords[:-1]
+            
+            return [[c[0], c[1]] for c in coords]
             
         except Exception as e:
             logger.warning(f"Error calculating setback polygon: {e}")

@@ -688,15 +688,117 @@ def cmd_visualize(args):
                                     edgecolor='red', alpha=0.9))
     
     # ============================================================
-    # LAYER 5: Property boundary (green outline)
+    # LAYER 5: Property boundary with colored segments (front/rear/sides)
     # ============================================================
     prop_coords = data.get("boundaries", {}).get("property_line", {}).get("coordinates", [[]])[0]
     local_prop = None  # Initialize for later use in view limits
+    segments_data = data.get("boundaries", {}).get("property_line", {}).get("segments", {})
+    
     if prop_coords:
         local_prop = to_local(prop_coords)
-        poly = MplPolygon(local_prop, fill=False, edgecolor='darkgreen', linewidth=4, 
-                         linestyle='-', zorder=5, label=f'Property Line ({prop_area:.1f}m²)')
-        ax.add_patch(poly)
+        
+        # Draw property line with colored segments if available
+        if segments_data:
+            def reconstruct_coords_from_edges(edge_indices, prop_coords_list):
+                """Reconstruct coordinates from edge indices"""
+                if not edge_indices:
+                    return []
+                
+                # Group consecutive edges
+                sorted_indices = sorted(edge_indices)
+                edge_groups = []
+                current_group = [sorted_indices[0]]
+                
+                for i in range(1, len(sorted_indices)):
+                    prev_idx = sorted_indices[i - 1]
+                    curr_idx = sorted_indices[i]
+                    prev_end = (prev_idx + 1) % len(prop_coords_list)
+                    
+                    if prev_end == curr_idx:
+                        current_group.append(curr_idx)
+                    else:
+                        edge_groups.append(current_group)
+                        current_group = [curr_idx]
+                
+                if current_group:
+                    edge_groups.append(current_group)
+                
+                # Use largest group
+                if len(edge_groups) > 1:
+                    largest_group = max(edge_groups, key=len)
+                    edge_groups = [largest_group]
+                
+                # Build coordinates
+                segment_coords = []
+                for group in edge_groups:
+                    for i, idx in enumerate(group):
+                        start_point = prop_coords_list[idx]
+                        end_idx = (idx + 1) % len(prop_coords_list)
+                        end_point = prop_coords_list[end_idx]
+                        
+                        if i == 0:
+                            segment_coords.append(start_point)
+                        segment_coords.append(end_point)
+                
+                # Remove duplicates and ensure not closed
+                cleaned = []
+                for coord in segment_coords:
+                    if not cleaned or (abs(cleaned[-1][0] - coord[0]) > 1e-6 or 
+                                      abs(cleaned[-1][1] - coord[1]) > 1e-6):
+                        cleaned.append(coord)
+                
+                if len(cleaned) > 2:
+                    if (abs(cleaned[0][0] - cleaned[-1][0]) < 1e-6 and
+                        abs(cleaned[0][1] - cleaned[-1][1]) < 1e-6):
+                        cleaned = cleaned[:-1]
+                
+                return cleaned
+            
+            # Draw each segment with its color
+            if segments_data.get("front"):
+                edge_indices = segments_data["front"].get("edges", [])
+                if edge_indices:
+                    front_coords = reconstruct_coords_from_edges(edge_indices, prop_coords)
+                    front_coords = to_local(front_coords)
+                    if len(front_coords) >= 2:
+                        xs, ys = zip(*front_coords)
+                        ax.plot(xs, ys, color=segments_data["front"]["color"], linewidth=5, 
+                               linestyle='-', zorder=5, label='Front (Road)', alpha=0.9)
+            
+            if segments_data.get("rear"):
+                edge_indices = segments_data["rear"].get("edges", [])
+                if edge_indices:
+                    rear_coords = reconstruct_coords_from_edges(edge_indices, prop_coords)
+                    rear_coords = to_local(rear_coords)
+                    if len(rear_coords) >= 2:
+                        xs, ys = zip(*rear_coords)
+                        ax.plot(xs, ys, color=segments_data["rear"]["color"], linewidth=5, 
+                               linestyle='-', zorder=5, label='Rear', alpha=0.9)
+            
+            if segments_data.get("left_side"):
+                edge_indices = segments_data["left_side"].get("edges", [])
+                if edge_indices:
+                    left_coords = reconstruct_coords_from_edges(edge_indices, prop_coords)
+                    left_coords = to_local(left_coords)
+                    if len(left_coords) >= 2:
+                        xs, ys = zip(*left_coords)
+                        ax.plot(xs, ys, color=segments_data["left_side"]["color"], linewidth=5, 
+                               linestyle='-', zorder=5, label='Left Side', alpha=0.9)
+            
+            if segments_data.get("right_side"):
+                edge_indices = segments_data["right_side"].get("edges", [])
+                if edge_indices:
+                    right_coords = reconstruct_coords_from_edges(edge_indices, prop_coords)
+                    right_coords = to_local(right_coords)
+                    if len(right_coords) >= 2:
+                        xs, ys = zip(*right_coords)
+                        ax.plot(xs, ys, color=segments_data["right_side"]["color"], linewidth=5, 
+                               linestyle='-', zorder=5, label='Right Side', alpha=0.9)
+        else:
+            # Fallback: draw as single green outline
+            poly = MplPolygon(local_prop, fill=False, edgecolor='darkgreen', linewidth=4, 
+                             linestyle='-', zorder=5, label=f'Property Line ({prop_area:.1f}m²)')
+            ax.add_patch(poly)
     
     # ============================================================
     # LAYER 6: Setback zone (orange dashed)
