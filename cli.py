@@ -852,7 +852,7 @@ def cmd_visualize(args):
         ax.add_patch(poly)
     
     # ============================================================
-    # LAYER 8: Existing structures (red hatched)
+    # LAYER 0: Existing structures (red hatched) - DRAWN FIRST so they don't hide setbacks/buildable
     # ============================================================
     existing = data.get("existing_structures", [])
     for structure in existing:
@@ -860,10 +860,10 @@ def cmd_visualize(args):
         if s_coords:
             local_s = to_local(s_coords)
             poly = MplPolygon(local_s, fill=True, facecolor='lightcoral', alpha=0.7, 
-                             edgecolor='darkred', linewidth=2, hatch='xx', zorder=6)
+                             edgecolor='darkred', linewidth=2, hatch='xx', zorder=1)
             ax.add_patch(poly)
             
-            # Label existing structure
+            # Label existing structure (keep label on top)
             center = get_polygon_center(local_s)
             status = structure.get("status", "existing")
             s_height = structure.get("height_m", 0)

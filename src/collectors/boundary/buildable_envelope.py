@@ -10,11 +10,13 @@ from loguru import logger
 
 try:
     from shapely.geometry import Polygon, Point, box
-    from shapely.ops import unary_union
+    from shapely.ops import unary_union, transform
+    from shapely.affinity import rotate
+    from pyproj import Transformer
     SHAPELY_AVAILABLE = True
 except ImportError:
     SHAPELY_AVAILABLE = False
-    logger.warning("Shapely not available - buildable envelope calculation will be limited")
+    logger.warning("Shapely/pyproj not available - buildable envelope calculation will be limited")
 
 from .models import BuildableEnvelope, PropertyLine, SetbackLine
 from .utils import calculate_polygon_area, calculate_perimeter, close_polygon
@@ -26,6 +28,16 @@ class BuildableEnvelopeProcessor:
     
     def __init__(self):
         self.config = get_config()
+        # Set up forward/backward transformers for metric calculations (default to UK EPSG:27700)
+        self.crs_wgs84 = "EPSG:4326"
+        self.crs_metric = getattr(self.config, "local_crs", "EPSG:27700")
+        try:
+            self.to_metric = Transformer.from_crs(self.crs_wgs84, self.crs_metric, always_xy=True).transform
+            self.to_wgs84 = Transformer.from_crs(self.crs_metric, self.crs_wgs84, always_xy=True).transform
+            self.transformers_ready = True
+        except Exception:
+            logger.warning("Failed to initialize CRS transformers; falling back to WGS84 computations (may distort rectangles)")
+            self.transformers_ready = False
     
     def calculate_buildable_envelope(
         self,
@@ -65,24 +77,110 @@ class BuildableEnvelopeProcessor:
             logger.warning("Invalid setback coordinates")
             return None
         
+        logger.info("=== BUILDABLE ENVELOPE CALCULATION DEBUG ===")
+        logger.info(f"Setback coordinates: {len(setback_coords)} points")
+        logger.info(f"Transformers ready: {self.transformers_ready}")
+        logger.info(f"Metric CRS: {self.crs_metric}")
+        
         try:
-            # Create setback polygon
+            # Create setback polygon in WGS84
             setback_coords_clean = close_polygon(setback_coords)
-            setback_poly = Polygon(setback_coords_clean)
+            setback_poly_wgs = Polygon(setback_coords_clean)
             
+            logger.info(f"Setback polygon (WGS84) area: {setback_poly_wgs.area:.6f} deg²")
+            logger.info(f"Setback polygon (WGS84) valid: {setback_poly_wgs.is_valid}")
+            
+            if self.transformers_ready:
+                # Reproject to metric CRS for accurate rectangle computation
+                setback_poly = transform(self.to_metric, setback_poly_wgs)
+                logger.info(f"Setback polygon (metric) area: {setback_poly.area:.2f} m²")
+                logger.info(f"Setback polygon (metric) valid: {setback_poly.is_valid}")
+                
+                # Try to fix invalid polygons (common after reprojection)
+                if not setback_poly.is_valid:
+                    logger.warning(f"Setback polygon invalid after reprojection, attempting to fix...")
+                    logger.debug(f"  Invalid reason: {setback_poly.validity_reason if hasattr(setback_poly, 'validity_reason') else 'unknown'}")
+                    
+                    # Try buffer(0) trick to fix self-intersections
+                    fixed_poly = setback_poly.buffer(0)
+                    
+                    # Handle MultiPolygon case
+                    if hasattr(fixed_poly, 'geoms'):
+                        # It's a MultiPolygon - take the largest polygon
+                        largest = max(fixed_poly.geoms, key=lambda g: g.area if hasattr(g, 'area') else 0)
+                        if isinstance(largest, Polygon):
+                            setback_poly = largest
+                            logger.info(f"  Fixed: extracted largest polygon from MultiPolygon (area: {setback_poly.area:.2f} m²)")
+                        else:
+                            logger.warning(f"  Could not extract valid polygon from MultiPolygon")
+                            return None
+                    else:
+                        setback_poly = fixed_poly
+                    
+                    if not setback_poly.is_valid:
+                        logger.warning(f"  Could not fix invalid polygon")
+                        return None
+                    else:
+                        logger.info(f"  Successfully fixed polygon (area: {setback_poly.area:.2f} m²)")
+            else:
+                setback_poly = setback_poly_wgs
+                logger.warning("Using WGS84 for rectangle calculation (may cause distortion)")
+            
+            # Final validation check
             if not setback_poly.is_valid:
-                logger.warning("Invalid setback polygon")
-                return None
+                logger.warning(f"Invalid setback polygon (final validation failed)")
+                logger.debug(f"  Polygon type: {type(setback_poly)}")
+                logger.debug(f"  Polygon area: {setback_poly.area}")
+                # Try one more fix attempt
+                try:
+                    fixed = setback_poly.buffer(0)
+                    if hasattr(fixed, 'geoms'):
+                        fixed = max(fixed.geoms, key=lambda g: g.area if hasattr(g, 'area') else 0)
+                    if isinstance(fixed, Polygon) and fixed.is_valid:
+                        setback_poly = fixed
+                        logger.info(f"  Final fix attempt succeeded (area: {setback_poly.area:.2f} m²)")
+                    else:
+                        logger.warning(f"  Final fix attempt failed - polygon still invalid")
+                        return None
+                except Exception as e:
+                    logger.warning(f"  Final fix attempt raised exception: {e}")
+                    return None
+            
+            logger.info(f"Setback polygon validated successfully (area: {setback_poly.area:.2f} m², valid: {setback_poly.is_valid})")
             
             # Find largest inscribed rectangle
+            logger.info("Searching for largest inscribed rectangle...")
             rectangle = self._find_largest_inscribed_rectangle(setback_poly)
             
             if not rectangle:
                 logger.warning("Failed to find inscribed rectangle")
                 return None
             
-            # Validate it's actually a rectangle (should have 4 or 5 points: 4 corners + optional closing)
-            coords_list = list(rectangle.exterior.coords)
+            logger.info(f"Found rectangle area: {rectangle.area:.2f} m²")
+            logger.info(f"Rectangle bounds: {rectangle.bounds}")
+            
+            # Validate it's actually a rectangle (orthogonal edges)
+            is_rect = self._is_rectangle(rectangle)
+            logger.info(f"Rectangle validation (orthogonal edges): {is_rect}")
+            
+            if not is_rect:
+                logger.warning("Found shape is not a proper rectangle (edges not orthogonal)")
+                # Log rectangle coordinates for debugging
+                rect_coords = list(rectangle.exterior.coords)[:4]
+                logger.debug(f"Rectangle coordinates: {rect_coords}")
+                return None
+            
+            # Reproject rectangle back to WGS84 if needed
+            if self.transformers_ready:
+                rectangle_wgs = transform(self.to_wgs84, rectangle)
+                logger.info(f"Reprojected rectangle back to WGS84")
+            else:
+                rectangle_wgs = rectangle
+            
+            # Validate it has exactly 4 corners
+            coords_list = list(rectangle_wgs.exterior.coords)
+            logger.info(f"Rectangle has {len(coords_list)} coordinate points")
+            
             if len(coords_list) < 4 or len(coords_list) > 5:
                 logger.warning(f"Invalid rectangle: expected 4-5 points, got {len(coords_list)}")
                 return None
@@ -101,6 +199,13 @@ class BuildableEnvelopeProcessor:
             center_lat = sum(c[1] for c in rect_coords) / len(rect_coords)
             area = calculate_polygon_area(rect_coords, center_lat)
             perimeter = calculate_perimeter(rect_coords, center_lat)
+            
+            logger.info(f"Buildable envelope calculated:")
+            logger.info(f"  Area: {area:.2f} m²")
+            logger.info(f"  Perimeter: {perimeter:.2f} m")
+            logger.info(f"  Setback area: {setback_line.area_sqm if setback_line else 'N/A'} m²")
+            logger.info(f"  Efficiency: {(area / setback_line.area_sqm * 100) if setback_line else 0:.1f}%")
+            logger.info("=== END BUILDABLE ENVELOPE DEBUG ===\n")
             
             return BuildableEnvelope(
                 coordinates=rect_coords,
@@ -133,23 +238,36 @@ class BuildableEnvelopeProcessor:
         
         best_rectangle = None
         best_area = 0
+        best_angle = None
         
-        # Try different rotation angles (0 to 90 degrees in 10-degree steps for speed)
+        logger.info(f"Searching for largest inscribed rectangle in polygon (area: {polygon.area:.2f} m²)")
+        
+        # Try different rotation angles (0 to 90 degrees in 1-degree steps)
+        angles_tried = 0
         for angle_deg in range(0, 91, 10):
             try:
-                # Rotate polygon to align with axes
-                rotated_poly = self._rotate_polygon(polygon, -angle_deg)
+                # Rotate polygon to align with axes using Shapely's affine rotation
+                # This preserves geometry integrity (parallel edges, right angles)
+                rotated_poly = rotate(polygon, -angle_deg, origin='centroid', use_radians=False)
                 
                 # Find largest axis-aligned rectangle
                 rect = self._find_largest_axis_aligned_rectangle(rotated_poly)
                 
                 if rect and rect.area > best_area:
                     best_area = rect.area
-                    # Rotate back
-                    best_rectangle = self._rotate_polygon(rect, angle_deg)
+                    best_angle = angle_deg
+                    # Rotate back using Shapely's affine rotation to preserve rectangle shape
+                    best_rectangle = rotate(rect, angle_deg, origin='centroid', use_radians=False)
+                angles_tried += 1
             except Exception as e:
                 logger.debug(f"Error at angle {angle_deg}: {e}")
                 continue
+        
+        if best_rectangle:
+            logger.info(f"Best rectangle found at angle {best_angle}°: area = {best_area:.2f} m²")
+            logger.info(f"  Rectangle efficiency: {(best_area / polygon.area * 100):.1f}% of setback area")
+        else:
+            logger.warning(f"No rectangle found after trying {angles_tried} angles")
         
         return best_rectangle
     
@@ -179,6 +297,8 @@ class BuildableEnvelopeProcessor:
         num_samples = 20
         best_rect = None
         best_area = 0
+        
+        logger.debug(f"  Searching axis-aligned rectangles: bounding box {width:.2f}m × {height:.2f}m")
         
         # Try different rectangle sizes (from small to large)
         for i in range(1, num_samples + 1):
@@ -215,6 +335,7 @@ class BuildableEnvelopeProcessor:
         
         # If no rectangle found, try a simpler approach with progressively smaller rectangles
         if not best_rect:
+            logger.debug(f"  No rectangle found in main search, trying fallback strategy...")
             center_x = (min_x + max_x) / 2
             center_y = (min_y + max_y) / 2
             
@@ -246,34 +367,34 @@ class BuildableEnvelopeProcessor:
         
         return best_rect
     
-    def _rotate_polygon(
-        self,
-        polygon: Polygon,
-        angle_deg: float
-    ) -> Polygon:
-        """Rotate polygon around its centroid"""
-        if angle_deg == 0:
-            return polygon
+    def _is_rectangle(self, poly: Polygon, tol: float = 1e-6) -> bool:
+        """
+        Validate that a polygon is a proper rectangle (orthogonal edges)
         
-        centroid = polygon.centroid
-        angle_rad = math.radians(angle_deg)
-        cos_a = math.cos(angle_rad)
-        sin_a = math.sin(angle_rad)
+        Args:
+            poly: Polygon to validate
+            tol: Tolerance for angle checking
+            
+        Returns:
+            True if polygon is a rectangle with orthogonal edges
+        """
+        coords = list(poly.exterior.coords)[:-1]
+        if len(coords) != 4:
+            return False
         
-        def rotate_point(x, y, cx, cy):
-            # Translate to origin
-            dx = x - cx
-            dy = y - cy
-            # Rotate
-            new_x = dx * cos_a - dy * sin_a
-            new_y = dx * sin_a + dy * cos_a
-            # Translate back
-            return (new_x + cx, new_y + cy)
+        def dot(a, b):
+            """Dot product of two vectors"""
+            return a[0]*b[0] + a[1]*b[1]
         
-        # Rotate exterior coordinates
-        rotated_coords = [
-            rotate_point(x, y, centroid.x, centroid.y)
-            for x, y in polygon.exterior.coords[:-1]
-        ]
+        # Check that adjacent edges are perpendicular (dot product should be ~0)
+        for i in range(4):
+            p0 = coords[i]
+            p1 = coords[(i+1) % 4]
+            p2 = coords[(i+2) % 4]
+            v1 = (p1[0]-p0[0], p1[1]-p0[1])  # Edge from p0 to p1
+            v2 = (p2[0]-p1[0], p2[1]-p1[1])  # Edge from p1 to p2
+            # If edges are perpendicular, dot product should be 0
+            if abs(dot(v1, v2)) > tol:
+                return False
         
-        return Polygon(rotated_coords)
+        return True

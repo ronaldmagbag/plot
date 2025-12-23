@@ -337,7 +337,9 @@ class PlotAnalysisPipeline:
                     "area_sqm": buildable_envelope_obj.area_sqm,
                     "constraints_applied": []
                 }
+                logger.info(f"Buildable envelope calculated: {buildable_envelope_obj.area_sqm:.2f} m²")
             else:
+                logger.warning("Buildable envelope calculation returned None - will fall back to setback line")
                 buildable_result = None
         else:
             # Fallback to old method
@@ -677,7 +679,12 @@ class PlotAnalysisPipeline:
         )
         
         # Buildable envelope
-        buildable_coords = buildable_result["coordinates"] if buildable_result else setback_coords
+        if buildable_result:
+            buildable_coords = buildable_result["coordinates"]
+            logger.info(f"Using calculated buildable envelope: {buildable_result.get('area_sqm', 0):.2f} m²")
+        else:
+            buildable_coords = setback_coords
+            logger.warning("Buildable envelope not available - using setback line coordinates as fallback")
         constraints = buildable_result.get("constraints_applied", []) if buildable_result else []
         access_corridor_data = buildable_result.get("access_corridor", {}) if buildable_result else {}
         
@@ -1183,15 +1190,13 @@ class PlotAnalysisPipeline:
         determined_by = "estimation"
         
         if property_line_obj and hasattr(property_line_obj, 'front') and property_line_obj.front:
-            # Calculate center of front edges
+            # Calculate center of front edges (midpoint along the line by length)
             front_segment = property_line_obj.front
             front_coords = front_segment.get_coordinates(property_line_obj.coordinates)
             
             if front_coords and len(front_coords) >= 2:
-                # Calculate center point of all front edge coordinates
-                sum_lon = sum(c[0] for c in front_coords)
-                sum_lat = sum(c[1] for c in front_coords)
-                access_coords = [sum_lon / len(front_coords), sum_lat / len(front_coords)]
+                # Calculate midpoint along the line (not centroid of points)
+                access_coords = self._calculate_midpoint_along_line(front_coords)
                 side = "front"
                 confidence = "high"
                 determined_by = "front_edge_center"
@@ -1249,6 +1254,80 @@ class PlotAnalysisPipeline:
             vehicle_access=vehicle_access,
             pedestrian_access=pedestrian_access
         )
+    
+    def _calculate_midpoint_along_line(self, coords: List[List[float]]) -> List[float]:
+        """
+        Calculate the midpoint along a polyline by length (not centroid of points)
+        
+        Args:
+            coords: List of [lon, lat] coordinates forming a polyline
+            
+        Returns:
+            [lon, lat] of the midpoint along the line
+        """
+        if not coords or len(coords) < 2:
+            # Fallback: return first point or average
+            if coords:
+                return coords[0]
+            return [0, 0]
+        
+        if len(coords) == 2:
+            # Simple case: midpoint of single segment
+            return [
+                (coords[0][0] + coords[1][0]) / 2,
+                (coords[0][1] + coords[1][1]) / 2
+            ]
+        
+        # Calculate total length and segment lengths
+        import math
+        segment_lengths = []
+        total_length = 0.0
+        
+        for i in range(len(coords) - 1):
+            p1 = coords[i]
+            p2 = coords[i + 1]
+            
+            # Calculate distance using Haversine (approximate for small distances)
+            avg_lat = (p1[1] + p2[1]) / 2
+            m_per_deg_lat = 111000
+            m_per_deg_lon = 111000 * abs(math.cos(math.radians(avg_lat)))
+            m_per_deg = (m_per_deg_lat + m_per_deg_lon) / 2
+            
+            dx = (p2[0] - p1[0]) * m_per_deg_lon
+            dy = (p2[1] - p1[1]) * m_per_deg_lat
+            segment_length = math.sqrt(dx**2 + dy**2)
+            
+            segment_lengths.append(segment_length)
+            total_length += segment_length
+        
+        if total_length == 0:
+            # All points are the same, return first point
+            return coords[0]
+        
+        # Find midpoint: point at half the total length
+        target_length = total_length / 2
+        accumulated_length = 0.0
+        
+        for i in range(len(segment_lengths)):
+            segment_len = segment_lengths[i]
+            
+            if accumulated_length + segment_len >= target_length:
+                # Midpoint is on this segment
+                remaining = target_length - accumulated_length
+                ratio = remaining / segment_len if segment_len > 0 else 0
+                
+                p1 = coords[i]
+                p2 = coords[i + 1]
+                
+                mid_lon = p1[0] + (p2[0] - p1[0]) * ratio
+                mid_lat = p1[1] + (p2[1] - p1[1]) * ratio
+                
+                return [mid_lon, mid_lat]
+            
+            accumulated_length += segment_len
+        
+        # Fallback: return last point (shouldn't happen)
+        return coords[-1]
     
     def _build_existing_structures(
         self,
