@@ -9,10 +9,10 @@ Implements Pipeline Layer 2 (Data Acquisition):
 - BoundaryCollector: Property boundaries from cadastral sources
 """
 
-from .osm_collector import OSMCollector
+from .osm import OSMCollector
 from .elevation_collector import ElevationCollector
 from .soil_collector import SoilCollector
-from .boundary_collector import BoundaryCollector
+from .boundary import BoundaryCollector
 from .terrain_collector import TerrainCollector
 from .vegetation_collector import VegetationCollector
 from .mapbox_imagery_collector import MapboxImageryCollector

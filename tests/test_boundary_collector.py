@@ -29,8 +29,8 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from loguru import logger
-from src.collectors.boundary_collector import BoundaryCollector
-from src.collectors.osm_collector import OSMCollector
+from src.collectors.boundary import BoundaryCollector
+from src.collectors.osm import OSMCollector
 
 
 def setup_logging(verbose: bool = False):

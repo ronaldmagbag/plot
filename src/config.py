@@ -30,6 +30,11 @@ class UKRegulatory:
     conditional_uses: List[str] = field(default_factory=lambda: [
         "accessory_dwelling_unit"
     ])
+    
+    # Property line thresholds
+    property_line_max_area_sqm: float = 2000.0  # If property > this, use OSM logic
+    property_line_max_perimeter_m: float = 200.0  # If perimeter > this, use OSM logic
+    property_line_min_side_distance_m: float = 3.0  # If side distance < this, consider merging
 
 
 @dataclass 
