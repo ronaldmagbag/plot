@@ -244,7 +244,7 @@ class BuildableEnvelopeProcessor:
         
         # Try different rotation angles (0 to 90 degrees in 1-degree steps)
         angles_tried = 0
-        for angle_deg in range(0, 91, 10):
+        for angle_deg in range(0, 91, 5):
             try:
                 # Rotate polygon to align with axes using Shapely's affine rotation
                 # This preserves geometry integrity (parallel edges, right angles)

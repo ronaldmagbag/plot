@@ -499,8 +499,8 @@ class PlotAnalysisPipeline:
             bbox_json = json.dumps(bbox)
             
             # Find SAM3 script path
-            # __file__ is at src/pipeline.py, so go up to plot/ and then to scripts/
-            script_path = Path(__file__).parent.parent / "scripts" / "sam3_segment.py"
+            # __file__ is at src/pipeline.py, so go to src/segmentation/
+            script_path = Path(__file__).parent / "segmentation" / "sam3_segment.py"
             if not script_path.exists():
                 logger.warning(f"SAM3 script not found at {script_path}")
                 logger.debug(f"Looking for script relative to: {Path(__file__).parent.parent}")

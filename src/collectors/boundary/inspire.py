@@ -27,15 +27,21 @@ class InspireHandler:
     """Handles INSPIRE GML cadastral data"""
     
     def __init__(self, inspire_gml_path: Optional[str] = None):
-        self.inspire_gml_path = inspire_gml_path or self._find_default_inspire_gml()
+        self.inspire_gml_path = inspire_gml_path
         self._inspire_gdf = None
         self._inspire_gdf_wgs84 = None
+        self._loaded_gml_files = []  # Track which files were loaded
         
-        if self.inspire_gml_path and GEOPANDAS_AVAILABLE:
-            self._load_inspire_gml()
+        if GEOPANDAS_AVAILABLE:
+            if self.inspire_gml_path:
+                # Load specific GML file
+                self._load_inspire_gml(self.inspire_gml_path)
+            else:
+                # Load all GML files from default directory
+                self._load_all_inspire_gml()
     
-    def _find_default_inspire_gml(self) -> Optional[str]:
-        """Find INSPIRE GML file in default data/inspires directory"""
+    def _find_all_inspire_gml(self) -> List[Path]:
+        """Find all INSPIRE GML files in default data/inspires directory"""
         # Try to find the project root (assuming we're in src/collectors/boundary/)
         current_file = Path(__file__)
         project_root = current_file.parent.parent.parent.parent
@@ -44,41 +50,100 @@ class InspireHandler:
         inspire_dir = project_root / "data" / "inspires"
         
         if inspire_dir.exists():
-            # Look for .gml files
-            gml_files = list(inspire_dir.glob("*.gml"))
+            # Look for all .gml files
+            gml_files = sorted(inspire_dir.glob("*.gml"))
             if gml_files:
-                # Use the first .gml file found
-                default_gml = str(gml_files[0])
-                logger.debug(f"Found default INSPIRE GML file: {default_gml}")
-                return default_gml
+                logger.debug(f"Found {len(gml_files)} INSPIRE GML file(s): {[f.name for f in gml_files]}")
+                return gml_files
         
-        logger.debug("No INSPIRE GML file found in data/inspires/ - will use OSM data")
-        return None
+        logger.debug("No INSPIRE GML files found in data/inspires/ - will use OSM data")
+        return []
     
-    def _load_inspire_gml(self):
-        """Load INSPIRE GML file for cadastral boundary queries"""
+    def _load_all_inspire_gml(self):
+        """Load all INSPIRE GML files from default directory and merge them"""
+        if not GEOPANDAS_AVAILABLE:
+            logger.warning("Geopandas not available - cannot load INSPIRE GML")
+            return
+        
+        gml_files = self._find_all_inspire_gml()
+        if not gml_files:
+            return
+        
+        all_gdfs = []
+        self._loaded_gml_files = []
+        
+        for gml_path in gml_files:
+            try:
+                logger.info(f"Loading INSPIRE GML file: {gml_path.name}")
+                gdf = gpd.read_file(str(gml_path))
+                
+                # Ensure CRS is set (should be EPSG:27700 for UK INSPIRE data)
+                if gdf.crs is None:
+                    logger.warning(f"No CRS found in {gml_path.name}, assuming EPSG:27700")
+                    gdf.set_crs("EPSG:27700", inplace=True)
+                
+                # Add source column to track which file each parcel came from
+                gdf['_source_file'] = gml_path.name
+                
+                all_gdfs.append(gdf)
+                self._loaded_gml_files.append(str(gml_path))
+                logger.info(f"  Loaded {len(gdf)} parcels from {gml_path.name}")
+                
+            except Exception as e:
+                logger.warning(f"Failed to load {gml_path.name}: {e}")
+                continue
+        
+        if not all_gdfs:
+            logger.warning("No GML files could be loaded")
+            return
+        
+        # Merge all GeoDataFrames
+        try:
+            import pandas as pd
+            self._inspire_gdf = gpd.GeoDataFrame(pd.concat(all_gdfs, ignore_index=True))
+            
+            # Ensure CRS is consistent
+            if self._inspire_gdf.crs is None:
+                self._inspire_gdf.set_crs("EPSG:27700", inplace=True)
+            
+            # Convert to WGS84 for spatial queries
+            self._inspire_gdf_wgs84 = self._inspire_gdf.to_crs("EPSG:4326")
+            
+            logger.info(f"Successfully merged {len(self._loaded_gml_files)} GML file(s): {len(self._inspire_gdf)} total cadastral parcels")
+            
+        except Exception as e:
+            logger.warning(f"Failed to merge GML files: {e}")
+            self._inspire_gdf = None
+            self._inspire_gdf_wgs84 = None
+    
+    def _load_inspire_gml(self, gml_path: str):
+        """Load a specific INSPIRE GML file for cadastral boundary queries"""
         if not GEOPANDAS_AVAILABLE:
             logger.warning("Geopandas not available - cannot load INSPIRE GML")
             return
         
         try:
-            gml_path = Path(self.inspire_gml_path)
-            if not gml_path.exists():
+            gml_path_obj = Path(gml_path)
+            if not gml_path_obj.exists():
                 logger.warning(f"INSPIRE GML file not found: {gml_path}")
                 return
             
-            logger.info(f"Loading INSPIRE GML file: {gml_path}")
-            self._inspire_gdf = gpd.read_file(str(gml_path))
+            logger.info(f"Loading INSPIRE GML file: {gml_path_obj.name}")
+            self._inspire_gdf = gpd.read_file(str(gml_path_obj))
             
             # Ensure CRS is set (should be EPSG:27700 for UK INSPIRE data)
             if self._inspire_gdf.crs is None:
                 logger.warning("No CRS found in GML, assuming EPSG:27700")
                 self._inspire_gdf.set_crs("EPSG:27700", inplace=True)
             
+            # Add source column
+            self._inspire_gdf['_source_file'] = gml_path_obj.name
+            self._loaded_gml_files = [str(gml_path_obj)]
+            
             # Convert to WGS84 for spatial queries
             self._inspire_gdf_wgs84 = self._inspire_gdf.to_crs("EPSG:4326")
             
-            logger.info(f"Loaded {len(self._inspire_gdf)} INSPIRE cadastral parcels")
+            logger.info(f"Loaded {len(self._inspire_gdf)} INSPIRE cadastral parcels from {gml_path_obj.name}")
             
         except Exception as e:
             logger.warning(f"Failed to load INSPIRE GML file: {e}")
@@ -147,12 +212,16 @@ class InspireHandler:
                     inspire_id = row[col]
                     break
             
+            # Get source file name if available
+            source_file = row.get('_source_file', 'unknown')
+            
             return {
                 "coordinates": coords,
                 "area_sqm": area_sqm,
                 "source": "inspire_cadastral",
                 "accuracy_m": 0.5,  # INSPIRE cadastral data is very accurate
-                "inspire_id": inspire_id
+                "inspire_id": inspire_id,
+                "inspire_source_file": source_file
             }
             
         except Exception as e:

@@ -121,7 +121,7 @@ pipeline.save(result, "output/my_plot.json")
 python cli.py generate --lat 51.268535 --lon -0.570979 --output plot_gu47nn.json
 
 # Generate 20 South UK samples
-python generate_samples.py --count 20 --output ./output
+python tests/generate_samples.py --count 20 --output ./output
 
 # Visualize a plot
 python cli.py visualize --input output/plot.json --output plot.png
@@ -203,8 +203,12 @@ plot/
 │       ├── setback_calculator.py   # Zoning rule engine
 │       └── geometry_utils.py       # Shapely geometry helpers
 ├── cli.py                     # Command-line interface
-├── generate_samples.py        # Batch sample generator
 ├── requirements.txt
+├── tests/
+│   ├── generate_samples.py        # Batch sample generator
+│   ├── generate_residential_samples.py  # Residential sample generator
+│   ├── debug_classifier.py      # Property line classifier debug tool
+│   └── test_*.py                # Unit tests
 ├── docs/
 │   ├── Plot Analysis Data Structure.md
 │   └── plot.json              # Example output

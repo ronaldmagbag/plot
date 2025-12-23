@@ -9,6 +9,8 @@ Usage:
     python tests/test_sam3_segmentation.py --lat 51.268535 --lon -0.570979
     python tests/test_sam3_segmentation.py --lat 51.268535 --lon -0.570979 --radius 50
     python tests/test_sam3_segmentation.py --lat 51.268535 --lon -0.570979 --image path/to/image.jpg
+    
+Note: The SAM3 segmentation script is now located at src/segmentation/sam3_segment.py
 """
 
 import os
@@ -132,7 +134,7 @@ def test_sam3_segmentation(
     
     try:
         # Find SAM3 script
-        script_path = project_root / "scripts" / "sam3_segment.py"
+        script_path = project_root / "src" / "segmentation" / "sam3_segment.py"
         if not script_path.exists():
             logger.error(f"SAM3 script not found at {script_path}")
             return 1
