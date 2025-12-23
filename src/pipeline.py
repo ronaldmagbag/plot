@@ -390,7 +390,7 @@ class PlotAnalysisPipeline:
         analysis = self._build_analysis(shadow_result, adjacency_result)
         
         # Access
-        access = self._build_access(property_coords, osm_roads, adjacency_result)
+        access = self._build_access(property_coords, osm_roads, adjacency_result, property_line_obj)
         
         # Existing structures (use pre-filtered existing_buildings)
         existing_structures = self._build_existing_structures(existing_buildings)
@@ -1171,39 +1171,60 @@ class PlotAnalysisPipeline:
         self,
         property_coords: List[List[float]],
         roads: List[Dict[str, Any]],
-        adjacency_result: List[Dict[str, Any]]
+        adjacency_result: List[Dict[str, Any]],
+        property_line_obj: Optional[Any] = None
     ) -> Access:
         """Build Access model"""
         
-        # Find primary access from adjacency
-        primary_edge = None
-        for edge in adjacency_result:
-            if edge.get("adjacent_to") == "street":
-                primary_edge = edge
-                break
+        # Try to get access point from front edges of property line
+        access_coords = None
+        side = "estimated"
+        confidence = "low"
+        determined_by = "estimation"
         
-        # Determine access point location
-        if primary_edge:
-            geom = primary_edge.get("geometry", {})
-            coords = geom.get("coordinates", [[0, 0], [0, 0]])
-            if len(coords) >= 2:
-                mid_lon = (coords[0][0] + coords[1][0]) / 2
-                mid_lat = (coords[0][1] + coords[1][1]) / 2
-                access_coords = [mid_lon, mid_lat]
-                side = "north" if "north" in primary_edge.get("edge_id", "") else "street"
+        if property_line_obj and hasattr(property_line_obj, 'front') and property_line_obj.front:
+            # Calculate center of front edges
+            front_segment = property_line_obj.front
+            front_coords = front_segment.get_coordinates(property_line_obj.coordinates)
+            
+            if front_coords and len(front_coords) >= 2:
+                # Calculate center point of all front edge coordinates
+                sum_lon = sum(c[0] for c in front_coords)
+                sum_lat = sum(c[1] for c in front_coords)
+                access_coords = [sum_lon / len(front_coords), sum_lat / len(front_coords)]
+                side = "front"
+                confidence = "high"
+                determined_by = "front_edge_center"
+        
+        # Fallback to adjacency-based method if front edges not available
+        if access_coords is None:
+            primary_edge = None
+            for edge in adjacency_result:
+                if edge.get("adjacent_to") == "street":
+                    primary_edge = edge
+                    break
+            
+            if primary_edge:
+                geom = primary_edge.get("geometry", {})
+                coords = geom.get("coordinates", [[0, 0], [0, 0]])
+                if len(coords) >= 2:
+                    mid_lon = (coords[0][0] + coords[1][0]) / 2
+                    mid_lat = (coords[0][1] + coords[1][1]) / 2
+                    access_coords = [mid_lon, mid_lat]
+                    side = "north" if "north" in primary_edge.get("edge_id", "") else "street"
+                    confidence = "high"
+                    determined_by = "street_adjacency"
+                else:
+                    access_coords = [property_coords[0][0], property_coords[0][1]] if property_coords else [0, 0]
             else:
-                access_coords = [property_coords[0][0], property_coords[0][1]]
-                side = "estimated"
-        else:
-            # Default to first point
-            access_coords = [property_coords[0][0], property_coords[0][1]] if property_coords else [0, 0]
-            side = "estimated"
+                # Default to first point
+                access_coords = [property_coords[0][0], property_coords[0][1]] if property_coords else [0, 0]
         
         primary_access = PrimaryAccessPoint(
             location=GeoJSONPoint(coordinates=access_coords),
             side=side,
-            confidence="high" if primary_edge else "low",
-            determined_by="street_adjacency" if primary_edge else "estimation",
+            confidence=confidence,
+            determined_by=determined_by,
             alternatives=[]
         )
         

@@ -28,8 +28,9 @@ class SetbackLineProcessor:
     
     def __init__(self):
         self.config = get_config()
-        self.front_rear_setback_m = 4.0
-        self.side_setback_m = 1.0
+        self.front_setback_m = self.config.uk_regulatory.front_setback_m
+        self.rear_setback_m = self.config.uk_regulatory.rear_setback_m
+        self.side_setback_m = self.config.uk_regulatory.side_setback_m
     
     def calculate_setback_line(
         self,
@@ -38,13 +39,12 @@ class SetbackLineProcessor:
         """
         Calculate setback line from property line
         
-        Setback rules:
-        - 4m from front and rear lines
-        - 1m from side lines
+        Setback rules (configurable in config.py):
+        - front_setback_m (default 4m) from front edges
+        - rear_setback_m (default 3m) from rear edges
+        - side_setback_m (default 1m) from side edges
         
-        Note: Current implementation uses 4m uniform buffer (conservative approach).
-        This ensures front/rear meet requirements; sides will be 4m instead of 1m.
-        For exact variable setbacks per edge, more complex geometric operations are needed.
+        Uses classified segments to apply appropriate setback to each edge.
         
         Args:
             property_line: PropertyLine object with classified segments
@@ -90,7 +90,8 @@ class SetbackLineProcessor:
                 perimeter_m=perimeter,
                 setback_type="full",
                 metadata={
-                    "front_rear_setback_m": self.front_rear_setback_m,
+                    "front_setback_m": self.front_setback_m,
+                    "rear_setback_m": self.rear_setback_m,
                     "side_setback_m": self.side_setback_m
                 }
             )
@@ -105,56 +106,241 @@ class SetbackLineProcessor:
         property_line: PropertyLine
     ) -> Optional[List[List[float]]]:
         """
-        Calculate setback polygon by offsetting edges
+        Calculate setback polygon by offsetting edges with variable setbacks
+        
+        Applies different setbacks per edge based on classification:
+        - Front edges: front_setback_m (default 4m)
+        - Rear edges: rear_setback_m (default 3m)
+        - Side edges: side_setback_m (default 1m)
         
         Strategy:
-        1. Buffer inward by front/rear setback (4m) - this is the maximum
-        2. This ensures front/rear have correct setback
-        3. Sides will have more than 1m, but that's acceptable (conservative)
-        
-        Alternative: Use average setback (2.5m) as approximation
+        1. Identify which edges belong to front/rear/sides
+        2. Offset each edge inward by its appropriate distance
+        3. Reconstruct polygon from offset edges
         """
         try:
+            # Get property coordinates
+            prop_coords = close_polygon(property_line.coordinates)
+            num_edges = len(prop_coords) - 1  # Exclude closing point
+            
+            # Build edge classification map
+            edge_classification = {}  # edge_index -> setback_distance_m
+            
+            # Classify edges based on segments
+            if property_line.front:
+                for edge_idx in property_line.front.edge_indices:
+                    edge_classification[edge_idx] = self.front_setback_m
+            
+            if property_line.rear:
+                for edge_idx in property_line.rear.edge_indices:
+                    edge_classification[edge_idx] = self.rear_setback_m
+            
+            if property_line.left_side:
+                for edge_idx in property_line.left_side.edge_indices:
+                    if edge_idx not in edge_classification:  # Don't override if already classified
+                        edge_classification[edge_idx] = self.side_setback_m
+            
+            if property_line.right_side:
+                for edge_idx in property_line.right_side.edge_indices:
+                    if edge_idx not in edge_classification:  # Don't override if already classified
+                        edge_classification[edge_idx] = self.side_setback_m
+            
+            # Default to side setback for unclassified edges
+            for i in range(num_edges):
+                if i not in edge_classification:
+                    edge_classification[i] = self.side_setback_m
+            
             # Convert meters to degrees
             center_lat = prop_poly.centroid.y
             m_per_deg_lat = 111000
             m_per_deg_lon = 111000 * abs(math.cos(math.radians(center_lat)))
-            # Use average for approximation
             m_per_deg = (m_per_deg_lat + m_per_deg_lon) / 2
             
-            # Use front/rear setback (4m) as the buffer distance
-            # This ensures front/rear are correct, sides will be conservative
-            setback_deg = self.front_rear_setback_m / m_per_deg
+            # Determine polygon orientation (counter-clockwise = positive area)
+            # For counter-clockwise: inward is to the right of edge direction
+            # For clockwise: inward is to the left of edge direction
+            polygon_area = prop_poly.area
+            is_ccw = polygon_area > 0  # Counter-clockwise if positive area
             
-            # Ensure polygon is valid and has correct orientation
-            if not prop_poly.is_valid:
-                # Try to fix invalid polygon
-                prop_poly = prop_poly.buffer(0)
+            # Offset each edge and collect offset points
+            offset_points = []
             
-            # Buffer inward (negative value shrinks the polygon)
-            # Use resolution parameter for better accuracy
-            buffered = prop_poly.buffer(-setback_deg, cap_style=2, join_style=2, resolution=16)
+            for i in range(num_edges):
+                start_point = Point(prop_coords[i])
+                end_point = Point(prop_coords[i + 1])
+                
+                # Get setback distance for this edge
+                setback_m = edge_classification.get(i, self.side_setback_m)
+                setback_deg = setback_m / m_per_deg
+                
+                # Calculate edge vector
+                dx = end_point.x - start_point.x
+                dy = end_point.y - start_point.y
+                edge_length = math.sqrt(dx**2 + dy**2)
+                
+                if edge_length < 1e-10:
+                    # Degenerate edge, skip
+                    continue
+                
+                # Normalize edge direction
+                dx_norm = dx / edge_length
+                dy_norm = dy / edge_length
+                
+                # Calculate perpendicular vector (pointing inward)
+                # For counter-clockwise polygon: right of edge = (-dy, dx)
+                # For clockwise polygon: left of edge = (dy, -dx)
+                if is_ccw:
+                    perp_x = -dy_norm
+                    perp_y = dx_norm
+                else:
+                    perp_x = dy_norm
+                    perp_y = -dx_norm
+                
+                # Offset both start and end points inward
+                start_offset = Point(
+                    start_point.x + perp_x * setback_deg,
+                    start_point.y + perp_y * setback_deg
+                )
+                end_offset = Point(
+                    end_point.x + perp_x * setback_deg,
+                    end_point.y + perp_y * setback_deg
+                )
+                
+                offset_points.append((i, start_offset, end_offset, setback_m))
             
-            # Handle case where buffer creates empty or invalid geometry
-            if not isinstance(buffered, Polygon):
-                logger.warning(f"Buffer returned non-polygon: {type(buffered)}")
-                # Try with smaller buffer
-                setback_deg = self.side_setback_m / m_per_deg
-                buffered = prop_poly.buffer(-setback_deg, cap_style=2, join_style=2, resolution=16)
+            # Reconstruct polygon from offset points
+            # Connect offset points, handling corners where edges meet
+            setback_coords = []
             
-            if not isinstance(buffered, Polygon) or not buffered.is_valid:
-                logger.warning("Setback buffer failed - returning None")
+            for i in range(len(offset_points)):
+                curr_idx, curr_start, curr_end, curr_setback = offset_points[i]
+                next_idx, next_start, next_end, next_setback = offset_points[(i + 1) % len(offset_points)]
+                
+                # Use the end point of current edge
+                # At corners, we need to find intersection of two offset lines
+                if i == 0:
+                    # First point: use start of first edge
+                    setback_coords.append([curr_start.x, curr_start.y])
+                
+                # Calculate corner intersection
+                # Line 1: from curr_end to curr_end + edge_direction
+                # Line 2: from next_start to next_start + edge_direction
+                # Find intersection of offset lines
+                
+                # Get edge directions
+                curr_edge_start = Point(prop_coords[curr_idx])
+                curr_edge_end = Point(prop_coords[curr_idx + 1])
+                next_edge_start = Point(prop_coords[next_idx])
+                next_edge_end = Point(prop_coords[next_idx + 1])
+                
+                curr_dx = curr_edge_end.x - curr_edge_start.x
+                curr_dy = curr_edge_end.y - curr_edge_start.y
+                curr_len = math.sqrt(curr_dx**2 + curr_dy**2)
+                
+                next_dx = next_edge_end.x - next_edge_start.x
+                next_dy = next_edge_end.y - next_edge_start.y
+                next_len = math.sqrt(next_dx**2 + next_dy**2)
+                
+                if curr_len > 1e-10 and next_len > 1e-10:
+                    # Normalize
+                    curr_dx /= curr_len
+                    curr_dy /= curr_len
+                    next_dx /= next_len
+                    next_dy /= next_len
+                    
+                    # Perpendicular vectors (inward) - use same orientation logic
+                    if is_ccw:
+                        curr_perp_x = -curr_dy
+                        curr_perp_y = curr_dx
+                        next_perp_x = -next_dy
+                        next_perp_y = next_dx
+                    else:
+                        curr_perp_x = curr_dy
+                        curr_perp_y = -curr_dx
+                        next_perp_x = next_dy
+                        next_perp_y = -next_dx
+                    
+                    # Offset distances
+                    curr_offset_deg = edge_classification.get(curr_idx, self.side_setback_m) / m_per_deg
+                    next_offset_deg = edge_classification.get(next_idx, self.side_setback_m) / m_per_deg
+                    
+                    # Offset line 1: through curr_end
+                    line1_p1 = Point(
+                        curr_edge_end.x + curr_perp_x * curr_offset_deg,
+                        curr_edge_end.y + curr_perp_y * curr_offset_deg
+                    )
+                    line1_p2 = Point(
+                        line1_p1.x + curr_dx,
+                        line1_p1.y + curr_dy
+                    )
+                    
+                    # Offset line 2: through next_start
+                    line2_p1 = Point(
+                        next_edge_start.x + next_perp_x * next_offset_deg,
+                        next_edge_start.y + next_perp_y * next_offset_deg
+                    )
+                    line2_p2 = Point(
+                        line2_p1.x + next_dx,
+                        line2_p1.y + next_dy
+                    )
+                    
+                    # Find intersection of two lines
+                    intersection = self._line_intersection(
+                        line1_p1, line1_p2, line2_p1, line2_p2
+                    )
+                    
+                    if intersection:
+                        setback_coords.append([intersection.x, intersection.y])
+                    else:
+                        # Fallback: use midpoint
+                        mid_x = (curr_end.x + next_start.x) / 2
+                        mid_y = (curr_end.y + next_start.y) / 2
+                        setback_coords.append([mid_x, mid_y])
+                else:
+                    # Degenerate edge, use simple offset
+                    setback_coords.append([curr_end.x, curr_end.y])
+            
+            if len(setback_coords) < 3:
+                logger.warning("Not enough offset points for setback polygon")
                 return None
             
-            # Verify the buffered polygon is actually smaller (inside property)
-            if buffered.area >= prop_poly.area:
-                logger.warning(f"Setback buffer failed - buffered area ({buffered.area}) >= property area ({prop_poly.area})")
-                # This shouldn't happen with negative buffer, but if it does, return None
+            # Create polygon from offset coordinates
+            setback_poly = Polygon(setback_coords)
+            
+            # Validate
+            if not setback_poly.is_valid:
+                # Try to fix - buffer(0) might return MultiPolygon
+                fixed = setback_poly.buffer(0)
+                
+                # Handle MultiPolygon case
+                if hasattr(fixed, 'geoms'):
+                    # It's a MultiPolygon - take the largest polygon
+                    largest = max(fixed.geoms, key=lambda g: g.area if hasattr(g, 'area') else 0)
+                    setback_poly = largest if isinstance(largest, Polygon) else fixed
+                else:
+                    setback_poly = fixed
+            
+            # Check if it's still a MultiPolygon
+            if hasattr(setback_poly, 'geoms'):
+                # Extract largest polygon from MultiPolygon
+                largest = max(setback_poly.geoms, key=lambda g: g.area if hasattr(g, 'area') else 0)
+                if isinstance(largest, Polygon):
+                    setback_poly = largest
+                else:
+                    logger.warning("Setback polygon is MultiPolygon and cannot extract single polygon")
+                    return None
+            
+            if not isinstance(setback_poly, Polygon) or not setback_poly.is_valid or setback_poly.area <= 0:
+                logger.warning("Invalid setback polygon after offsetting")
                 return None
             
-            # Extract coordinates and ensure they're in correct format
-            coords = list(buffered.exterior.coords)
-            # Remove duplicate closing point if present
+            # Verify setback is inside property
+            if setback_poly.area >= prop_poly.area:
+                logger.warning(f"Setback area ({setback_poly.area}) >= property area ({prop_poly.area})")
+                return None
+            
+            # Extract coordinates
+            coords = list(setback_poly.exterior.coords)
             if len(coords) > 1 and coords[0] == coords[-1]:
                 coords = coords[:-1]
             
@@ -162,5 +348,52 @@ class SetbackLineProcessor:
             
         except Exception as e:
             logger.warning(f"Error calculating setback polygon: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    def _line_intersection(
+        self,
+        p1: Point, p2: Point,
+        p3: Point, p4: Point
+    ) -> Optional[Point]:
+        """
+        Find intersection point of two line segments
+        
+        Returns None if lines are parallel or don't intersect
+        """
+        try:
+            # Line 1: p1 -> p2
+            # Line 2: p3 -> p4
+            
+            # Parametric form:
+            # Line 1: x = p1.x + t*(p2.x - p1.x), y = p1.y + t*(p2.y - p1.y)
+            # Line 2: x = p3.x + s*(p4.x - p3.x), y = p3.y + s*(p4.y - p3.y)
+            
+            dx1 = p2.x - p1.x
+            dy1 = p2.y - p1.y
+            dx2 = p4.x - p3.x
+            dy2 = p4.y - p3.y
+            
+            # Solve for t and s
+            # p1.x + t*dx1 = p3.x + s*dx2
+            # p1.y + t*dy1 = p3.y + s*dy2
+            
+            denominator = dx1 * dy2 - dy1 * dx2
+            
+            if abs(denominator) < 1e-10:
+                # Lines are parallel
+                return None
+            
+            t = ((p3.x - p1.x) * dy2 - (p3.y - p1.y) * dx2) / denominator
+            
+            # Calculate intersection point
+            intersection_x = p1.x + t * dx1
+            intersection_y = p1.y + t * dy1
+            
+            return Point(intersection_x, intersection_y)
+            
+        except Exception as e:
+            logger.debug(f"Line intersection calculation failed: {e}")
             return None
     

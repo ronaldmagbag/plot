@@ -11,8 +11,8 @@ import os
 class UKRegulatory:
     """Default UK residential building regulations"""
     # Standard setbacks for residential (meters)
-    front_setback_m: float = 5.0
-    rear_setback_m: float = 5.0
+    front_setback_m: float = 4.0
+    rear_setback_m: float = 3.0
     side_setback_m: float = 1.0
     
     # Building constraints

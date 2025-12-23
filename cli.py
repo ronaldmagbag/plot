@@ -754,49 +754,71 @@ def cmd_visualize(args):
                 
                 return cleaned
             
-            # Draw each segment with its color
+            def draw_all_edge_groups(edge_indices, color, label):
+                """Draw all consecutive groups of edges as separate line segments"""
+                if not edge_indices:
+                    return
+                
+                # Group consecutive edges
+                sorted_indices = sorted(edge_indices)
+                edge_groups = []
+                current_group = [sorted_indices[0]]
+                
+                for i in range(1, len(sorted_indices)):
+                    prev_idx = sorted_indices[i - 1]
+                    curr_idx = sorted_indices[i]
+                    prev_end = (prev_idx + 1) % len(prop_coords)
+                    
+                    if prev_end == curr_idx:
+                        current_group.append(curr_idx)
+                    else:
+                        edge_groups.append(current_group)
+                        current_group = [curr_idx]
+                
+                if current_group:
+                    edge_groups.append(current_group)
+                
+                # Draw each group separately
+                for group in edge_groups:
+                    group_coords = reconstruct_coords_from_edges(group, prop_coords)
+                    if len(group_coords) >= 2:
+                        local_coords = to_local(group_coords)
+                        xs, ys = zip(*local_coords)
+                        # Only add label to first group to avoid duplicate legend entries
+                        ax.plot(xs, ys, color=color, linewidth=2, 
+                               linestyle='-', zorder=5, label=label if group == edge_groups[0] else '', alpha=0.9)
+            
+            # Draw each segment with its color - draw all groups
             if segments_data.get("front"):
-                edge_indices = segments_data["front"].get("edges", [])
-                if edge_indices:
-                    front_coords = reconstruct_coords_from_edges(edge_indices, prop_coords)
-                    front_coords = to_local(front_coords)
-                    if len(front_coords) >= 2:
-                        xs, ys = zip(*front_coords)
-                        ax.plot(xs, ys, color=segments_data["front"]["color"], linewidth=5, 
-                               linestyle='-', zorder=5, label='Front (Road)', alpha=0.9)
+                draw_all_edge_groups(
+                    segments_data["front"].get("edges", []),
+                    segments_data["front"]["color"],
+                    'Front (Road)'
+                )
             
             if segments_data.get("rear"):
-                edge_indices = segments_data["rear"].get("edges", [])
-                if edge_indices:
-                    rear_coords = reconstruct_coords_from_edges(edge_indices, prop_coords)
-                    rear_coords = to_local(rear_coords)
-                    if len(rear_coords) >= 2:
-                        xs, ys = zip(*rear_coords)
-                        ax.plot(xs, ys, color=segments_data["rear"]["color"], linewidth=5, 
-                               linestyle='-', zorder=5, label='Rear', alpha=0.9)
+                draw_all_edge_groups(
+                    segments_data["rear"].get("edges", []),
+                    segments_data["rear"]["color"],
+                    'Rear'
+                )
             
             if segments_data.get("left_side"):
-                edge_indices = segments_data["left_side"].get("edges", [])
-                if edge_indices:
-                    left_coords = reconstruct_coords_from_edges(edge_indices, prop_coords)
-                    left_coords = to_local(left_coords)
-                    if len(left_coords) >= 2:
-                        xs, ys = zip(*left_coords)
-                        ax.plot(xs, ys, color=segments_data["left_side"]["color"], linewidth=5, 
-                               linestyle='-', zorder=5, label='Left Side', alpha=0.9)
+                draw_all_edge_groups(
+                    segments_data["left_side"].get("edges", []),
+                    segments_data["left_side"]["color"],
+                    'Left Side'
+                )
             
             if segments_data.get("right_side"):
-                edge_indices = segments_data["right_side"].get("edges", [])
-                if edge_indices:
-                    right_coords = reconstruct_coords_from_edges(edge_indices, prop_coords)
-                    right_coords = to_local(right_coords)
-                    if len(right_coords) >= 2:
-                        xs, ys = zip(*right_coords)
-                        ax.plot(xs, ys, color=segments_data["right_side"]["color"], linewidth=5, 
-                               linestyle='-', zorder=5, label='Right Side', alpha=0.9)
+                draw_all_edge_groups(
+                    segments_data["right_side"].get("edges", []),
+                    segments_data["right_side"]["color"],
+                    'Right Side'
+                )
         else:
             # Fallback: draw as single green outline
-            poly = MplPolygon(local_prop, fill=False, edgecolor='darkgreen', linewidth=4, 
+            poly = MplPolygon(local_prop, fill=False, edgecolor='darkgreen', linewidth=2, 
                              linestyle='-', zorder=5, label=f'Property Line ({prop_area:.1f}m²)')
             ax.add_patch(poly)
     

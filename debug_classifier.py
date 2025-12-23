@@ -116,7 +116,8 @@ def main():
         classified_property_line = classifier.classify(
             property_line,
             osm_roads,
-            []  # Empty buildings list
+            [],  # Empty buildings list
+            debug=True  # Enable debug logging
         )
         
         logger.info("")
@@ -277,38 +278,30 @@ def visualize_classification(
             ax.plot(xs, ys, color='gray', linewidth=4, alpha=0.7, zorder=1)
     
     # Draw property line with colored segments (no labels)
-    # Reconstruct coordinates from edge indices
+    # Reconstruct coordinates from edge indices - draw all groups separately
+    def draw_segment_groups(segment, color):
+        """Draw all coordinate groups for a segment"""
+        if not segment:
+            return
+        groups = segment.get_coordinate_groups(property_line.coordinates)
+        for group_coords in groups:
+            if len(group_coords) >= 2:
+                local_coords = to_local(group_coords)
+                xs, ys = zip(*local_coords)
+                ax.plot(xs, ys, color=color, linewidth=6, 
+                       linestyle='-', zorder=5, alpha=0.9)
+    
     if property_line.front:
-        front_coords = property_line.front.get_coordinates(property_line.coordinates)
-        if len(front_coords) >= 2:
-            front_coords = to_local(front_coords)
-            xs, ys = zip(*front_coords)
-            ax.plot(xs, ys, color=property_line.front.color, linewidth=6, 
-                   linestyle='-', zorder=5, alpha=0.9)
+        draw_segment_groups(property_line.front, property_line.front.color)
     
     if property_line.rear:
-        rear_coords = property_line.rear.get_coordinates(property_line.coordinates)
-        if len(rear_coords) >= 2:
-            rear_coords = to_local(rear_coords)
-            xs, ys = zip(*rear_coords)
-            ax.plot(xs, ys, color=property_line.rear.color, linewidth=6, 
-                   linestyle='-', zorder=5, alpha=0.9)
+        draw_segment_groups(property_line.rear, property_line.rear.color)
     
     if property_line.left_side:
-        left_coords = property_line.left_side.get_coordinates(property_line.coordinates)
-        if len(left_coords) >= 2:
-            left_coords = to_local(left_coords)
-            xs, ys = zip(*left_coords)
-            ax.plot(xs, ys, color=property_line.left_side.color, linewidth=6, 
-                   linestyle='-', zorder=5, alpha=0.9)
+        draw_segment_groups(property_line.left_side, property_line.left_side.color)
     
     if property_line.right_side:
-        right_coords = property_line.right_side.get_coordinates(property_line.coordinates)
-        if len(right_coords) >= 2:
-            right_coords = to_local(right_coords)
-            xs, ys = zip(*right_coords)
-            ax.plot(xs, ys, color=property_line.right_side.color, linewidth=6, 
-                   linestyle='-', zorder=5, alpha=0.9)
+        draw_segment_groups(property_line.right_side, property_line.right_side.color)
     
     # Set axis - clean, no labels
     ax.set_xlim(x_min, x_max)

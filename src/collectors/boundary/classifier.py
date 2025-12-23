@@ -33,7 +33,8 @@ class PropertyLineClassifier:
         self,
         property_line: PropertyLine,
         osm_roads: List[Dict[str, Any]],
-        osm_buildings: List[Dict[str, Any]]
+        osm_buildings: List[Dict[str, Any]],
+        debug: bool = False
     ) -> PropertyLine:
         """
         Classify property line into front, rear, and side segments
@@ -90,11 +91,12 @@ class PropertyLineClassifier:
             # Merge all road segments with the same name into one road
             merged_road = self._merge_roads_by_name(road_name, osm_roads, closest_road)
             
-            logger.info(f"=== PROPERTY LINE CLASSIFICATION DEBUG ===")
-            logger.info(f"Closest road: {road_name}, centroid-to-road distance: {distance_from_road:.2f}m")
-            logger.info(f"Merged {len([r for r in osm_roads if r.get('name') == road_name])} segments into one road")
-            logger.info(f"Property line has {len(coords_clean)} edges")
-            logger.info("")
+            if debug:
+                logger.info(f"=== PROPERTY LINE CLASSIFICATION DEBUG ===")
+                logger.info(f"Closest road: {road_name}, centroid-to-road distance: {distance_from_road:.2f}m")
+                logger.info(f"Merged {len([r for r in osm_roads if r.get('name') == road_name])} segments into one road")
+                logger.info(f"Property line has {len(coords_clean)} edges")
+                logger.info("")
             
             # Step 2: Classify each edge
             front_edge_indices = []
@@ -121,27 +123,30 @@ class PropertyLineClassifier:
                 m_per_deg = (m_per_deg_lat + m_per_deg_lon) / 2
                 edge_length_m = edge_length * m_per_deg
                 
-                logger.info(f"--- Edge {i} ---")
-                logger.info(f"  Start: ({edge_start[0]:.6f}, {edge_start[1]:.6f})")
-                logger.info(f"  End:   ({edge_end[0]:.6f}, {edge_end[1]:.6f})")
-                logger.info(f"  Length: {edge_length_m:.2f}m")
+                if debug:
+                    logger.info(f"--- Edge {i} ---")
+                    logger.info(f"  Start: ({edge_start[0]:.6f}, {edge_start[1]:.6f})")
+                    logger.info(f"  End:   ({edge_end[0]:.6f}, {edge_end[1]:.6f})")
+                    logger.info(f"  Length: {edge_length_m:.2f}m")
                 
                 # Find closest road line segment and calculate angle
                 # Use merged_road instead of closest_road
                 closest_road_segment, angle, min_distance = self._analyze_edge_road_relationship(
-                    edge_line, merged_road, edge_index=i
+                    edge_line, merged_road, edge_index=i, debug=debug
                 )
                 
                 if closest_road_segment is None:
                     # Can't determine - classify as side
-                    logger.info(f"  ❌ No closest road segment found - classifying as SIDE")
+                    if debug:
+                        logger.info(f"  ❌ No closest road segment found - classifying as SIDE")
+                        logger.info("")
                     side_edge_indices.append(i)
-                    logger.info("")
                     continue
                 
-                logger.info(f"  Dating angle: {angle:.2f}°")
-                logger.info(f"  Minimum distance (edge to road segment): {min_distance:.2f}m")
-                logger.info(f"  Centroid-to-road distance: {distance_from_road:.2f}m")
+                if debug:
+                    logger.info(f"  Dating angle: {angle:.2f}°")
+                    logger.info(f"  Minimum distance (edge to road segment): {min_distance:.2f}m")
+                    logger.info(f"  Centroid-to-road distance: {distance_from_road:.2f}m")
                 
                 # Classification based on angle
                 if -20 <= angle <= 20:
@@ -172,16 +177,18 @@ class PropertyLineClassifier:
                     "reason": reason
                 })
                 
-                logger.info(f"  ✅ Classification: {classification}")
-                logger.info(f"  Reason: {reason}")
-                logger.info("")
+                if debug:
+                    logger.info(f"  ✅ Classification: {classification}")
+                    logger.info(f"  Reason: {reason}")
+                    logger.info("")
             
-            logger.info(f"=== SUMMARY ===")
-            logger.info(f"Front edges: {len(front_edge_indices)} (indices: {front_edge_indices})")
-            logger.info(f"Rear edges: {len(rear_edge_indices)} (indices: {rear_edge_indices})")
-            logger.info(f"Side edges: {len(side_edge_indices)} (indices: {side_edge_indices})")
-            logger.info(f"Total: {len(front_edge_indices) + len(rear_edge_indices) + len(side_edge_indices)}/{len(coords_clean)} edges classified")
-            logger.info("")
+            if debug:
+                logger.info(f"=== SUMMARY ===")
+                logger.info(f"Front edges: {len(front_edge_indices)} (indices: {front_edge_indices})")
+                logger.info(f"Rear edges: {len(rear_edge_indices)} (indices: {rear_edge_indices})")
+                logger.info(f"Side edges: {len(side_edge_indices)} (indices: {side_edge_indices})")
+                logger.info(f"Total: {len(front_edge_indices) + len(rear_edge_indices) + len(side_edge_indices)}/{len(coords_clean)} edges classified")
+                logger.info("")
             
             # Step 3: Create segments
             front_segment = self._create_segment_from_indices(
@@ -362,7 +369,8 @@ class PropertyLineClassifier:
             }
         }
         
-        logger.info(f"Merged {len(same_name_roads)} segments of '{road_name}' into {len(cleaned_coords)} points")
+        # Log only if debug is enabled (but we don't have debug param here, so use logger.debug)
+        logger.debug(f"Merged {len(same_name_roads)} segments of '{road_name}' into {len(cleaned_coords)} points")
         
         return merged_road
     
@@ -370,7 +378,8 @@ class PropertyLineClassifier:
         self,
         edge_line: LineString,
         road: Dict[str, Any],
-        edge_index: Optional[int] = None
+        edge_index: Optional[int] = None,
+        debug: bool = False
     ) -> Tuple[Optional[LineString], float, float]:
         """
         Analyze relationship between edge and road
@@ -418,13 +427,14 @@ class PropertyLineClassifier:
         m_per_deg = (m_per_deg_lat + m_per_deg_lon) / 2
         min_distance_m = min_distance_deg * m_per_deg
         
-        logger.info(f"  Closest road segment: segment {closest_segment_idx}")
-        logger.info(f"    Road segment start: ({road_seg_start[0]:.6f}, {road_seg_start[1]:.6f})")
-        logger.info(f"    Road segment end:   ({road_seg_end[0]:.6f}, {road_seg_end[1]:.6f})")
-        logger.info(f"    Minimum distance (edge to road segment): {min_distance_m:.2f}m")
+        if debug:
+            logger.info(f"  Closest road segment: segment {closest_segment_idx}")
+            logger.info(f"    Road segment start: ({road_seg_start[0]:.6f}, {road_seg_start[1]:.6f})")
+            logger.info(f"    Road segment end:   ({road_seg_end[0]:.6f}, {road_seg_end[1]:.6f})")
+            logger.info(f"    Minimum distance (edge to road segment): {min_distance_m:.2f}m")
         
         # Calculate angle between edge and road line
-        angle = self._calculate_angle_between_lines(edge_line, closest_segment, debug=True)
+        angle = self._calculate_angle_between_lines(edge_line, closest_segment, debug=debug)
         
         return closest_segment, angle, min_distance_m
     

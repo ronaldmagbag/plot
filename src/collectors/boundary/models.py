@@ -31,11 +31,30 @@ class PropertyLineSegment:
         """
         Reconstruct coordinates from edge indices
         
+        Returns the largest consecutive group only (for single LineString compatibility).
+        Use get_coordinate_groups() to get all groups.
+        
         Args:
             property_coords: Full property line coordinates
             
         Returns:
-            List of coordinates for this segment
+            List of coordinates for the largest consecutive group
+        """
+        groups = self.get_coordinate_groups(property_coords)
+        if not groups:
+            return []
+        # Return largest group
+        return max(groups, key=len) if len(groups) > 1 else groups[0]
+    
+    def get_coordinate_groups(self, property_coords: List[List[float]]) -> List[List[List[float]]]:
+        """
+        Reconstruct coordinates from edge indices, returning all consecutive groups
+        
+        Args:
+            property_coords: Full property line coordinates
+            
+        Returns:
+            List of coordinate groups (each group is a list of coordinates)
         """
         if not self.edge_indices:
             return []
@@ -59,14 +78,10 @@ class PropertyLineSegment:
         if current_group:
             edge_groups.append(current_group)
         
-        # Use largest group (or all if only one)
-        if len(edge_groups) > 1:
-            largest_group = max(edge_groups, key=len)
-            edge_groups = [largest_group]
-        
-        # Build coordinates from edges
-        segment_coords = []
+        # Build coordinates for each group
+        coordinate_groups = []
         for group in edge_groups:
+            segment_coords = []
             for i, idx in enumerate(group):
                 start_point = property_coords[idx]
                 end_idx = (idx + 1) % len(property_coords)
@@ -75,24 +90,27 @@ class PropertyLineSegment:
                 if i == 0:
                     segment_coords.append(start_point)
                 segment_coords.append(end_point)
-        
-        # Remove duplicates
-        cleaned_coords = []
-        for coord in segment_coords:
-            if not cleaned_coords:
-                cleaned_coords.append(coord)
-            else:
-                prev = cleaned_coords[-1]
-                if abs(prev[0] - coord[0]) > 1e-6 or abs(prev[1] - coord[1]) > 1e-6:
+            
+            # Remove duplicates
+            cleaned_coords = []
+            for coord in segment_coords:
+                if not cleaned_coords:
                     cleaned_coords.append(coord)
+                else:
+                    prev = cleaned_coords[-1]
+                    if abs(prev[0] - coord[0]) > 1e-6 or abs(prev[1] - coord[1]) > 1e-6:
+                        cleaned_coords.append(coord)
+            
+            # Ensure not closed
+            if len(cleaned_coords) > 2:
+                if (abs(cleaned_coords[0][0] - cleaned_coords[-1][0]) < 1e-6 and
+                    abs(cleaned_coords[0][1] - cleaned_coords[-1][1]) < 1e-6):
+                    cleaned_coords = cleaned_coords[:-1]
+            
+            if len(cleaned_coords) >= 2:
+                coordinate_groups.append(cleaned_coords)
         
-        # Ensure not closed
-        if len(cleaned_coords) > 2:
-            if (abs(cleaned_coords[0][0] - cleaned_coords[-1][0]) < 1e-6 and
-                abs(cleaned_coords[0][1] - cleaned_coords[-1][1]) < 1e-6):
-                cleaned_coords = cleaned_coords[:-1]
-        
-        return cleaned_coords
+        return coordinate_groups
 
 
 @dataclass
