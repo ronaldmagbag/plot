@@ -12,7 +12,7 @@ import requests
 from typing import Dict, Any
 from loguru import logger
 
-from ..config import get_config
+from ...config import get_config
 
 
 class OverpassAPIClient:

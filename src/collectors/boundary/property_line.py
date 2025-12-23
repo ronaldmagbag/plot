@@ -25,7 +25,7 @@ from .utils import (
     close_polygon,
     haversine_distance
 )
-from ..config import get_config
+from ...config import get_config
 
 
 class PropertyLineProcessor:

@@ -6,7 +6,7 @@ Handles road parsing and classification
 
 from typing import Dict, Any, Optional, List
 from .models import OSMWay
-from ..config import get_config
+from ...config import get_config
 
 
 class RoadProcessor:

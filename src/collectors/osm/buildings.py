@@ -16,7 +16,7 @@ except ImportError:
     SHAPELY_AVAILABLE = False
     logger.warning("Shapely not available - building merging will be limited")
 
-from ..config import get_config
+from ...config import get_config
 from .models import OSMWay
 
 

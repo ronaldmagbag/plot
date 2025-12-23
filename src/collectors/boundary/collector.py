@@ -30,7 +30,7 @@ from .utils import (
     point_roughly_in_polygon,
     haversine_distance
 )
-from ..config import get_config
+from ...config import get_config
 
 
 class BoundaryCollector:
@@ -111,6 +111,46 @@ class BoundaryCollector:
             )
         
         return property_line
+    
+    def get_setback_line(
+        self,
+        property_line: PropertyLine
+    ) -> Optional[SetbackLine]:
+        """
+        Get setback line from property line
+        
+        Args:
+            property_line: PropertyLine object
+            
+        Returns:
+            SetbackLine object or None
+        """
+        return self.setback_processor.calculate_setback_line(property_line)
+    
+    def get_buildable_envelope(
+        self,
+        property_line: PropertyLine,
+        setback_line: Optional[SetbackLine] = None
+    ) -> Optional[BuildableEnvelope]:
+        """
+        Get buildable envelope from property line and setback line
+        
+        Args:
+            property_line: PropertyLine object
+            setback_line: Optional SetbackLine (will be calculated if not provided)
+            
+        Returns:
+            BuildableEnvelope object or None
+        """
+        if not setback_line:
+            setback_line = self.get_setback_line(property_line)
+            if not setback_line:
+                logger.warning("Failed to calculate setback line")
+                return None
+        
+        return self.buildable_processor.calculate_buildable_envelope(
+            property_line, setback_line
+        )
     
     def get_plot_boundary(
         self,

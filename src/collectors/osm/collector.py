@@ -13,7 +13,7 @@ from .parser import OSMResponseParser
 from .buildings import BuildingProcessor
 from .roads import RoadProcessor
 from .features import FeatureProcessor
-from ..config import get_config
+from ...config import get_config
 
 
 class OSMCollector:
