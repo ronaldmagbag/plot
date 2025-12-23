@@ -48,7 +48,7 @@ from .collectors import (
     OSMCollector, ElevationCollector, SoilCollector, BoundaryCollector,
     TerrainCollector, VegetationCollector, MapboxImageryCollector
 )
-from .analysis import ShadowAnalyzer, AdjacencyAnalyzer, SetbackCalculator, SetbackOptimizer, GeometryUtils
+from .analysis import ShadowAnalyzer, AdjacencyAnalyzer, SetbackCalculator, GeometryUtils
 
 
 class PlotAnalysisPipeline:
@@ -79,7 +79,6 @@ class PlotAnalysisPipeline:
         self.shadow_analyzer = ShadowAnalyzer()
         self.adjacency_analyzer = AdjacencyAnalyzer()
         self.setback_calculator = SetbackCalculator()
-        self.setback_optimizer = SetbackOptimizer()
     
     def run(
         self,
@@ -244,23 +243,13 @@ class PlotAnalysisPipeline:
         
         logger.info(f"Separated {len(existing_buildings)} existing + {len(neighbor_buildings)} neighbor buildings")
         
-        # Calculate setbacks
-        # Use optimized setback if property boundary is from INSPIRE (accurate cadastral data)
-        # Otherwise use standard setback calculator
-        if boundary_data.get("source") == "inspire_cadastral":
-            logger.info("Using optimized setback calculator for INSPIRE cadastral boundary")
-            setback_result = self.setback_optimizer.calculate_optimal_setback(
-                property_coords,
-                roads=osm_roads,
-                neighbor_buildings=neighbor_buildings
-            )
-        else:
-            # Use standard setback calculator for OSM-derived boundaries
-            preliminary_adjacency = self._quick_adjacency(property_coords, osm_roads)
-            setback_result = self.setback_calculator.calculate_setbacks(
-                property_coords, preliminary_adjacency
-            )
+        # Preliminary adjacency for setback calculation
+        preliminary_adjacency = self._quick_adjacency(property_coords, osm_roads)
         
+        # Calculate setbacks
+        setback_result = self.setback_calculator.calculate_setbacks(
+            property_coords, preliminary_adjacency
+        )
         setback_coords = setback_result["coordinates"][0] if setback_result else property_coords
         
         # Calculate buildable envelope (pass neighbor buildings for constraint checking)
