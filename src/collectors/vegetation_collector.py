@@ -56,7 +56,7 @@ class VegetationCollector:
         self,
         lat: float,
         lon: float,
-        radius_m: float = 100,
+        radius_m: float,
         trees_from_osm: Optional[List[Dict]] = None,
         zones_from_osm: Optional[List[Dict]] = None
     ) -> VegetationData:

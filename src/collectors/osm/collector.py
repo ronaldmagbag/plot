@@ -40,7 +40,7 @@ class OSMCollector:
         self,
         lat: float,
         lon: float,
-        radius_m: float = 150
+        radius_m: float
     ) -> Dict[str, Any]:
         """
         Fetch ALL OSM features in a SINGLE batch query

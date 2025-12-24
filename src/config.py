@@ -73,14 +73,17 @@ class APIConfig:
 class PipelineConfig:
     """Pipeline configuration"""
     # Search radius around center point (meters)
-    search_radius_m: float = 40.0
-    context_radius_m: float = 50.0  # For roads and surrounding context (neighbors, roads, etc.)
+    # Used for property line detection, surrounding context (roads, buildings, imagery), etc.
+    search_radius_m: float = 20.0
     
     # Default country
     country: str = "GB"
     
     # Output settings
     output_dir: str = "output"
+    
+    # Feature flags
+    enable_sam3: bool = False  # Enable/disable SAM3 segmentation
     
     # API config
     api: APIConfig = field(default_factory=APIConfig)
@@ -133,4 +136,41 @@ config = PipelineConfig()
 def get_config() -> PipelineConfig:
     """Get global configuration"""
     return config
+
+
+def validate_config(config: PipelineConfig) -> None:
+    """
+    Validate that all required configuration values are set.
+    Raises ValueError if any required value is missing or invalid.
+    """
+    errors = []
+    
+    # Required: search_radius_m must be positive
+    if not hasattr(config, 'search_radius_m') or config.search_radius_m is None:
+        errors.append("search_radius_m is required in config but not set")
+    elif config.search_radius_m <= 0:
+        errors.append(f"search_radius_m must be positive, got {config.search_radius_m}")
+    
+    # Required: country code
+    if not hasattr(config, 'country') or not config.country:
+        errors.append("country is required in config but not set")
+    
+    # Required: API config
+    if not hasattr(config, 'api') or config.api is None:
+        errors.append("api configuration is required but not set")
+    else:
+        if not hasattr(config.api, 'overpass_url') or not config.api.overpass_url:
+            errors.append("api.overpass_url is required but not set")
+        if not hasattr(config.api, 'mapbox_max_zoom') or config.api.mapbox_max_zoom is None:
+            errors.append("api.mapbox_max_zoom is required but not set")
+        elif config.api.mapbox_max_zoom < 1 or config.api.mapbox_max_zoom > 22:
+            errors.append(f"api.mapbox_max_zoom must be between 1 and 22, got {config.api.mapbox_max_zoom}")
+    
+    # Required: UK regulatory settings
+    if not hasattr(config, 'uk_regulatory') or config.uk_regulatory is None:
+        errors.append("uk_regulatory configuration is required but not set")
+    
+    if errors:
+        error_msg = "Configuration validation failed:\n" + "\n".join(f"  - {e}" for e in errors)
+        raise ValueError(error_msg)
 

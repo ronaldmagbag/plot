@@ -99,7 +99,7 @@ class TerrainCollector:
         self, 
         lat: float, 
         lon: float, 
-        radius_m: float = 50
+        radius_m: float
     ) -> TerrainData:
         """
         Collect terrain data for plot area

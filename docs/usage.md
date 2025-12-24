@@ -1,5 +1,7 @@
 
 53.039271608492534, -1.2006180639806219
+53.03936634643617, -1.2000999470466172
+53.039579267660336, -1.200269987188616
 
 
 - Generation Plot Tests
@@ -12,6 +14,8 @@ python cli.py generate --lat 51.268523 --lon -0.570246 --output output\plot_gu47
 python cli.py generate --lat 51.2678554 --lon -0.5695425105 --output output\plot_gu47nn3.json
 
 python cli.py generate --lat 53.039271608492534 --lon -1.2006180639806219 --output output\plot_ash1.json
+python cli.py generate --lat 53.03936634643617 --lon -1.2000999470466172 --output output\plot_ash2.json
+python cli.py generate --lat 53.039579267660336 --lon -1.200269987188616 --output output\plot_ash3.json
 
 
 - Visualization Tests

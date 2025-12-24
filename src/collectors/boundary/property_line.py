@@ -44,7 +44,7 @@ class PropertyLineProcessor:
         self,
         lat: float,
         lon: float,
-        search_radius_m: float = 30,
+        search_radius_m: float,
         osm_buildings: Optional[List[Dict[str, Any]]] = None,
         osm_roads: Optional[List[Dict[str, Any]]] = None,
         osm_landuse: Optional[List[Dict[str, Any]]] = None
@@ -64,9 +64,11 @@ class PropertyLineProcessor:
         logger.info(f"Detecting property line at ({lat}, {lon})")
         
         # Try INSPIRE first
+        logger.info(f"Attempting to find property line from INSPIRE GML data...")
         inspire_data = self.inspire_handler.find_boundary(lat, lon)
         
         if inspire_data:
+            logger.info(f"Successfully found property line from INSPIRE GML data (area: {inspire_data.get('area_sqm', 0):.1f} m²)")
             # Check if property is too big
             if (inspire_data["area_sqm"] > self.max_area_sqm or
                 inspire_data.get("perimeter_m", 0) > self.max_perimeter_m):
@@ -90,6 +92,15 @@ class PropertyLineProcessor:
                         return merged
                 
                 return property_line
+        else:
+            # INSPIRE failed - log the reason
+            if self.inspire_handler._inspire_gdf_wgs84 is None:
+                if not self.inspire_handler._loaded_gml_files:
+                    logger.info("No INSPIRE GML files loaded - no GML files found in data/inspires/ directory")
+                else:
+                    logger.info(f"INSPIRE GML files loaded but no parcel found at ({lat}, {lon}) - point is outside GML coverage area")
+            else:
+                logger.info(f"INSPIRE GML query failed - no parcel found containing point ({lat}, {lon})")
         
         # Fallback to OSM-based detection
         logger.info("Using OSM-based property line detection")

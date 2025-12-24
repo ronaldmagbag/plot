@@ -57,7 +57,8 @@ class PlotAnalysisPipeline:
     
     Usage:
         pipeline = PlotAnalysisPipeline()
-        result = pipeline.run(lat=51.5074, lon=-0.1276)
+        # radius_m must be provided or set in config.search_radius_m
+        result = pipeline.run(lat=51.5074, lon=-0.1276, radius_m=50.0)
         pipeline.save(result, "output/plot.json")
     """
     
@@ -93,17 +94,36 @@ class PlotAnalysisPipeline:
         Args:
             lat: Latitude of plot center
             lon: Longitude of plot center
-            radius_m: Search radius (default from config)
+            radius_m: Search radius in meters (required - must be provided or set in config)
             plot_id: Optional custom plot ID
         
         Returns:
             Complete PlotAnalysis object
+            
+        Raises:
+            ValueError: If required configuration values are missing
         """
-        radius = radius_m or self.config.search_radius_m
-        context_radius = self.config.context_radius_m
+        # Validate configuration first
+        from src.config import validate_config
+        validate_config(self.config)
+        
+        # Determine radius: CLI argument takes precedence, then config, otherwise error
+        if radius_m is not None:
+            if radius_m <= 0:
+                raise ValueError(f"radius_m must be positive, got {radius_m}")
+            radius = radius_m
+        elif hasattr(self.config, 'search_radius_m') and self.config.search_radius_m is not None:
+            if self.config.search_radius_m <= 0:
+                raise ValueError(f"config.search_radius_m must be positive, got {self.config.search_radius_m}")
+            radius = self.config.search_radius_m
+        else:
+            raise ValueError(
+                "radius_m is required but not provided. "
+                "Either pass radius_m parameter or set search_radius_m in config."
+            )
         
         logger.info(f"Starting plot analysis pipeline for ({lat}, {lon})")
-        logger.info(f"Search radius: {radius}m, Context radius: {context_radius}m")
+        logger.info(f"Search radius: {radius}m")
         
         # Generate plot ID
         if not plot_id:
@@ -144,13 +164,51 @@ class PlotAnalysisPipeline:
         # Try boundary collector with OSM data (roads, buildings, and landuse) for better boundary detection
         # This allows deriving boundaries from roads and neighbor buildings, not just rectangles
         # Pass landuse data to avoid separate API call
+        # Get property line object (will be reused later for classification to avoid duplicate detection)
+        property_line_obj_stage1 = None
         if not boundary_data:
-            boundary_data = self.boundary_collector.get_plot_boundary(
+            # Get property line without classification first (for initial boundary)
+            # This will be reused in STAGE 3 with classification to avoid duplicate INSPIRE queries
+            property_line_obj_stage1 = self.boundary_collector.get_property_line(
                 lat, lon, radius,
                 osm_buildings=osm_buildings_preview,
                 osm_roads=osm_roads_preview,
-                osm_landuse=osm_landuse_preview
+                osm_landuse=osm_landuse_preview,
+                classify=False  # Don't classify yet, will do it later with full data
             )
+            
+            if property_line_obj_stage1:
+                # Convert to old format for compatibility
+                boundary_data = {
+                    "type": "Polygon",
+                    "coordinates": [property_line_obj_stage1.coordinates],
+                    "area_sqm": property_line_obj_stage1.area_sqm,
+                    "perimeter_m": property_line_obj_stage1.perimeter_m,
+                    "source": property_line_obj_stage1.source,
+                    "accuracy_m": property_line_obj_stage1.accuracy_m,
+                    "inspire_id": property_line_obj_stage1.inspire_id
+                }
+            else:
+                # Fallback: try OSM-based boundary detection (without calling get_property_line again)
+                # This avoids duplicate INSPIRE queries
+                logger.info("Property line detection returned None, trying OSM fallback methods...")
+                # Try OSM landuse first (already checked above, but try again)
+                if osm_landuse_preview:
+                    for landuse in osm_landuse_preview:
+                        geom = landuse.get("geometry", {})
+                        if geom.get("type") == "Polygon":
+                            coords = geom.get("coordinates", [[]])[0]
+                            if coords and len(coords) >= 4:
+                                if self._point_in_polygon_degrees(lon, lat, coords):
+                                    boundary_data = self.boundary_collector._create_boundary_from_coords(
+                                        coords, "openstreetmap_landuse", 2.0
+                                    )
+                                    break
+                
+                # If still no boundary, use default plot estimate
+                if not boundary_data:
+                    logger.info("Using default rectangular plot estimate for property boundary")
+                    boundary_data = self.boundary_collector._create_default_plot(lat, lon)
         
         property_coords = boundary_data.get("coordinates", [[]])[0]
         property_area = boundary_data.get("area_sqm", 300)
@@ -167,7 +225,7 @@ class PlotAnalysisPipeline:
             all_osm_features = all_osm_features_preview
         else:
             # Single batch query for all OSM features (reduces API calls from 4+ to 1)
-            all_osm_features = self.osm_collector.fetch_all_features(lat, lon, context_radius)
+            all_osm_features = self.osm_collector.fetch_all_features(lat, lon, radius)
         
         osm_buildings = all_osm_features["buildings"]
         osm_roads = all_osm_features["roads"]
@@ -188,76 +246,85 @@ class PlotAnalysisPipeline:
         # Soil
         soil_data = self.soil_collector.get_soil_data(lat, lon)
         
-        # Mapbox imagery and SAM3 segmentation
-        sam3_results = None
+        # Mapbox imagery download (always download if cache_dir available, regardless of SAM3 flag)
+        merged_image = None
+        imagery_metadata = None
         if self.cache_dir:
-            # Check if SAM3 results already exist
-            sam3_output_path = Path(self.cache_dir) / f"sam3_results_{lat:.6f}_{lon:.6f}.json"
-            if sam3_output_path.exists():
-                logger.info(f"Loading existing SAM3 results from {sam3_output_path.name}...")
-                try:
-                    with open(sam3_output_path, "r") as f:
-                        sam3_results = json.load(f)
-                    logger.info(f"SAM3 found: {len(sam3_results.get('roads', []))} roads, "
-                              f"{len(sam3_results.get('trees', []))} trees, "
-                              f"{len(sam3_results.get('grasses', []))} grasses")
-                except Exception as e:
-                    logger.warning(f"Failed to load existing SAM3 results: {e}, will regenerate")
-                    sam3_results = None
+            # Check if merged image already exists in cache
+            zoom = self.config.api.mapbox_max_zoom
+            cached_image_pattern = f"mapbox_merged_{lat:.6f}_{lon:.6f}_{radius}m_z{zoom}.jpg"
+            cached_images = list(Path(self.cache_dir).glob(cached_image_pattern))
             
-            # If SAM3 results don't exist, check for cached imagery and run segmentation
-            if sam3_results is None:
-                # Check if merged image already exists in cache
-                zoom = self.config.api.mapbox_max_zoom
-                cached_image_pattern = f"mapbox_merged_{lat:.6f}_{lon:.6f}_{context_radius}m_z{zoom}.jpg"
-                cached_images = list(Path(self.cache_dir).glob(cached_image_pattern))
-                
-                merged_image = None
-                imagery_metadata = None
-                
-                if cached_images:
-                    logger.info(f"Found cached merged image: {cached_images[0].name}, skipping download")
+            if cached_images:
+                logger.info(f"Found cached merged image: {cached_images[0].name}, skipping download")
+                try:
+                    from PIL import Image
+                    merged_image = Image.open(cached_images[0])
+                    # Reconstruct metadata from filename and config
+                    imagery_metadata = {
+                        "bounds": {
+                            "west": lon - radius / 111000 / abs(math.cos(math.radians(lat))),
+                            "east": lon + radius / 111000 / abs(math.cos(math.radians(lat))),
+                            "south": lat - radius / 111000,
+                            "north": lat + radius / 111000
+                        },
+                        "zoom": zoom,
+                        "center": [lon, lat],
+                        "radius_m": radius
+                    }
+                except Exception as e:
+                    logger.warning(f"Failed to load cached image: {e}, will re-download")
+                    cached_images = []
+            
+            if not cached_images:
+                logger.info("Downloading Mapbox satellite imagery...")
+                try:
+                    merged_image, imagery_metadata = self.mapbox_imagery_collector.download_imagery(
+                        lat, lon, radius_m=radius
+                    )
+                    if merged_image:
+                        logger.info(f"Successfully downloaded Mapbox imagery: {merged_image.size}")
+                except Exception as e:
+                    logger.warning(f"Mapbox imagery download failed: {e}")
+                    merged_image = None
+                    imagery_metadata = None
+        
+        # SAM3 segmentation (only if enabled)
+        sam3_results = None
+        if self.config.enable_sam3:
+            if self.cache_dir:
+                # Check if SAM3 results already exist
+                sam3_output_path = Path(self.cache_dir) / f"sam3_results_{lat:.6f}_{lon:.6f}.json"
+                if sam3_output_path.exists():
+                    logger.info(f"Loading existing SAM3 results from {sam3_output_path.name}...")
                     try:
-                        from PIL import Image
-                        merged_image = Image.open(cached_images[0])
-                        # Reconstruct metadata from filename and config
-                        imagery_metadata = {
-                            "bounds": {
-                                "west": lon - context_radius / 111000 / abs(math.cos(math.radians(lat))),
-                                "east": lon + context_radius / 111000 / abs(math.cos(math.radians(lat))),
-                                "south": lat - context_radius / 111000,
-                                "north": lat + context_radius / 111000
-                            },
-                            "zoom": zoom,
-                            "center": [lon, lat],
-                            "radius_m": context_radius
-                        }
+                        with open(sam3_output_path, "r") as f:
+                            sam3_results = json.load(f)
+                        logger.info(f"SAM3 found: {len(sam3_results.get('roads', []))} roads, "
+                                  f"{len(sam3_results.get('trees', []))} trees, "
+                                  f"{len(sam3_results.get('grasses', []))} grasses")
                     except Exception as e:
-                        logger.warning(f"Failed to load cached image: {e}, will re-download")
-                        cached_images = []
+                        logger.warning(f"Failed to load existing SAM3 results: {e}, will regenerate")
+                        sam3_results = None
                 
-                if not cached_images:
-                    logger.info("Downloading Mapbox satellite imagery for SAM3 segmentation...")
-                    try:
-                        merged_image, imagery_metadata = self.mapbox_imagery_collector.download_imagery(
-                            lat, lon, radius_m=context_radius
-                        )
-                    except Exception as e:
-                        logger.warning(f"Mapbox imagery download failed: {e}")
-                        merged_image = None
-                        imagery_metadata = None
-                
-                if merged_image and imagery_metadata:
+                # If SAM3 results don't exist and we have imagery, run segmentation
+                if sam3_results is None and merged_image and imagery_metadata:
                     logger.info("Running SAM3 segmentation...")
                     sam3_results = self._run_sam3_segmentation(
-                        merged_image, imagery_metadata, lat, lon
+                        merged_image, imagery_metadata, lat, lon, radius_m=radius
                     )
                     if sam3_results:
                         logger.info(f"SAM3 found: {len(sam3_results.get('roads', []))} roads, "
                                   f"{len(sam3_results.get('trees', []))} trees, "
                                   f"{len(sam3_results.get('grasses', []))} grasses")
+                    else:
+                        logger.warning("SAM3 segmentation completed but returned no results")
                 elif not merged_image:
                     logger.warning("No imagery available for SAM3 segmentation, skipping")
+            else:
+                logger.info("SAM3 segmentation requires cache_dir, skipping")
+        else:
+            logger.info("SAM3 segmentation is disabled in config (enable_sam3=False), skipping")
         
         # ============================================================
         # STAGE 3: Analysis
@@ -296,14 +363,25 @@ class PlotAnalysisPipeline:
         # Preliminary adjacency for setback calculation
         preliminary_adjacency = self._quick_adjacency(property_coords, osm_roads)
         
-        # Get property line with classification using new boundary collector
-        property_line_obj = self.boundary_collector.get_property_line(
-            lat, lon, radius,
-            osm_buildings=osm_buildings,
-            osm_roads=osm_roads,
-            osm_landuse=osm_landuse_preview,
-            classify=True
-        )
+        # Get property line with classification - reuse from STAGE 1 if available
+        if property_line_obj_stage1:
+            # Reuse property line from STAGE 1, but classify it now with full OSM data
+            logger.info("Reusing property line from STAGE 1, classifying with full OSM data...")
+            property_line_obj = self.boundary_collector.classifier.classify(
+                property_line_obj_stage1,
+                osm_roads,
+                osm_buildings,
+                debug=False
+            )
+        else:
+            # Get property line with classification using new boundary collector
+            property_line_obj = self.boundary_collector.get_property_line(
+                lat, lon, radius,
+                osm_buildings=osm_buildings,
+                osm_roads=osm_roads,
+                osm_landuse=osm_landuse_preview,
+                classify=True
+            )
         
         # If we got a property line object, use it; otherwise fall back to old method
         if property_line_obj:
@@ -452,7 +530,8 @@ class PlotAnalysisPipeline:
         merged_image,
         imagery_metadata: Dict[str, Any],
         lat: float,
-        lon: float
+        lon: float,
+        radius_m: float = None
     ) -> Optional[Dict[str, Any]]:
         """
         Run SAM3 segmentation on downloaded imagery.
@@ -476,10 +555,10 @@ class PlotAnalysisPipeline:
             # Reuse the already-cached merged image instead of saving again
             # The image was already saved by MapboxImageryCollector._save_to_cache()
             zoom = imagery_metadata.get("zoom", 20)
-            context_radius = self.config.context_radius_m
+            radius = radius_m or imagery_metadata.get("radius_m", self.config.search_radius_m)
             
             # Find the cached merged image
-            cached_image_pattern = f"mapbox_merged_{lat:.6f}_{lon:.6f}_{context_radius}m_z{zoom}.jpg"
+            cached_image_pattern = f"mapbox_merged_{lat:.6f}_{lon:.6f}_{radius}m_z{zoom}.jpg"
             cached_images = list(Path(self.cache_dir).glob(cached_image_pattern))
             
             if cached_images:

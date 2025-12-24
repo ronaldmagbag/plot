@@ -75,7 +75,7 @@ class BoundaryCollector:
         self,
         lat: float,
         lon: float,
-        search_radius_m: float = 30,
+        search_radius_m: float,
         osm_buildings: Optional[List[Dict[str, Any]]] = None,
         osm_roads: Optional[List[Dict[str, Any]]] = None,
         osm_landuse: Optional[List[Dict[str, Any]]] = None,
@@ -156,7 +156,7 @@ class BoundaryCollector:
         self,
         lat: float,
         lon: float,
-        search_radius_m: float = 30,
+        search_radius_m: float,
         osm_buildings: Optional[List[Dict[str, Any]]] = None,
         osm_roads: Optional[List[Dict[str, Any]]] = None,
         osm_landuse: Optional[List[Dict[str, Any]]] = None

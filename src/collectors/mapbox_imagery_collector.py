@@ -97,7 +97,7 @@ class MapboxImageryCollector:
         self,
         lat: float,
         lon: float,
-        radius_m: float = 60.0,
+        radius_m: float,
         zoom: Optional[int] = None
     ) -> Tuple[Optional[Image.Image], Dict[str, Any]]:
         """

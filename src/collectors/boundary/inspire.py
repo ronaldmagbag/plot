@@ -161,7 +161,15 @@ class InspireHandler:
         Returns:
             Dict with coordinates, area, perimeter, source, inspire_id, or None
         """
-        if self._inspire_gdf_wgs84 is None or not SHAPELY_AVAILABLE:
+        if not SHAPELY_AVAILABLE:
+            logger.debug("Shapely not available - cannot query INSPIRE GML data")
+            return None
+        
+        if self._inspire_gdf_wgs84 is None:
+            if not self._loaded_gml_files:
+                logger.debug("No INSPIRE GML data loaded - no GML files found or failed to load")
+            else:
+                logger.debug(f"INSPIRE GML data loaded from {len(self._loaded_gml_files)} file(s) but GeoDataFrame is None")
             return None
         
         try:
@@ -178,6 +186,7 @@ class InspireHandler:
                     matches.append((idx, row, geom))
             
             if not matches:
+                logger.debug(f"No INSPIRE parcel found containing point ({lat}, {lon}) - point is outside GML coverage")
                 return None
             
             # If multiple matches, prefer the smallest polygon (most specific)
@@ -232,7 +241,7 @@ class InspireHandler:
         self,
         lat: float,
         lon: float,
-        radius_m: float = 50.0
+        radius_m: float
     ) -> List[Dict[str, Any]]:
         """
         Find nearby parcels (for merging small properties)
