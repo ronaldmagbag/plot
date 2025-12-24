@@ -157,10 +157,22 @@ class SetbackLineProcessor:
             m_per_deg = (m_per_deg_lat + m_per_deg_lon) / 2
             
             # Determine polygon orientation (counter-clockwise = positive area)
-            # For counter-clockwise: inward is to the right of edge direction
-            # For clockwise: inward is to the left of edge direction
-            polygon_area = prop_poly.area
-            is_ccw = polygon_area > 0  # Counter-clockwise if positive area
+            # For counter-clockwise: inward is to the LEFT of edge direction (interior is left when walking boundary)
+            # For clockwise: inward is to the RIGHT of edge direction (interior is right when walking boundary)
+            # Use exterior.is_ccw which is more reliable than area in geographic coords
+            try:
+                is_ccw = prop_poly.exterior.is_ccw
+            except AttributeError:
+                # Fallback to area check if is_ccw not available
+                polygon_area = prop_poly.area
+                is_ccw = polygon_area > 0
+            
+            # Verify orientation by checking if centroid is inside
+            # This is a sanity check to catch orientation errors
+            centroid = prop_poly.centroid
+            if not prop_poly.contains(centroid):
+                logger.warning(f"Property polygon centroid is outside polygon - orientation may be wrong")
+                logger.warning(f"  is_ccw={is_ccw}, polygon area (deg²)={prop_poly.area}")
             
             # Offset each edge and collect offset points
             offset_points = []
@@ -290,15 +302,56 @@ class SetbackLineProcessor:
                     )
                     
                     if intersection:
-                        setback_coords.append([intersection.x, intersection.y])
+                        # CRITICAL: Verify intersection is inside the property polygon
+                        # If not, use a safer fallback (offset the original corner point)
+                        intersection_point = Point(intersection.x, intersection.y)
+                        if prop_poly.contains(intersection_point) or prop_poly.touches(intersection_point):
+                            setback_coords.append([intersection.x, intersection.y])
+                        else:
+                            # Intersection is outside property - use corner point offset by minimum setback
+                            corner_point = curr_edge_end  # This is the actual corner
+                            min_setback = min(curr_setback, next_setback)
+                            min_setback_deg = min_setback / m_per_deg
+                            # Use average perpendicular direction for corner
+                            avg_perp_x = (curr_perp_x + next_perp_x) / 2
+                            avg_perp_y = (curr_perp_y + next_perp_y) / 2
+                            # Normalize
+                            avg_perp_len = math.sqrt(avg_perp_x**2 + avg_perp_y**2)
+                            if avg_perp_len > 1e-10:
+                                avg_perp_x /= avg_perp_len
+                                avg_perp_y /= avg_perp_len
+                            safe_corner = Point(
+                                corner_point.x + avg_perp_x * min_setback_deg,
+                                corner_point.y + avg_perp_y * min_setback_deg
+                            )
+                            setback_coords.append([safe_corner.x, safe_corner.y])
+                            logger.debug(f"Corner intersection outside property, using safe corner offset (edge {curr_idx})")
                     else:
-                        # Fallback: use midpoint
-                        mid_x = (curr_end.x + next_start.x) / 2
-                        mid_y = (curr_end.y + next_start.y) / 2
-                        setback_coords.append([mid_x, mid_y])
+                        # Lines parallel - use corner point offset by minimum setback
+                        corner_point = curr_edge_end
+                        min_setback = min(curr_setback, next_setback)
+                        min_setback_deg = min_setback / m_per_deg
+                        # Use average perpendicular direction
+                        avg_perp_x = (curr_perp_x + next_perp_x) / 2
+                        avg_perp_y = (curr_perp_y + next_perp_y) / 2
+                        avg_perp_len = math.sqrt(avg_perp_x**2 + avg_perp_y**2)
+                        if avg_perp_len > 1e-10:
+                            avg_perp_x /= avg_perp_len
+                            avg_perp_y /= avg_perp_len
+                        safe_corner = Point(
+                            corner_point.x + avg_perp_x * min_setback_deg,
+                            corner_point.y + avg_perp_y * min_setback_deg
+                        )
+                        setback_coords.append([safe_corner.x, safe_corner.y])
+                        logger.debug(f"Parallel lines at corner, using safe corner offset (edge {curr_idx})")
                 else:
-                    # Degenerate edge, use simple offset
-                    setback_coords.append([curr_end.x, curr_end.y])
+                    # Degenerate edge - use the already-calculated offset point
+                    # curr_end and next_start are the offset Points from offset_points
+                    # Use the midpoint of these offset points as a safe fallback
+                    mid_x = (curr_end.x + next_start.x) / 2
+                    mid_y = (curr_end.y + next_start.y) / 2
+                    setback_coords.append([mid_x, mid_y])
+                    logger.debug(f"Degenerate edge at corner, using midpoint of offset points (edge {curr_idx})")
             
             if len(setback_coords) < 3:
                 logger.warning("Not enough offset points for setback polygon")
@@ -334,9 +387,63 @@ class SetbackLineProcessor:
                 logger.warning("Invalid setback polygon after offsetting")
                 return None
             
-            # Verify setback is inside property
-            if setback_poly.area >= prop_poly.area:
-                logger.warning(f"Setback area ({setback_poly.area}) >= property area ({prop_poly.area})")
+            # CRITICAL FIX: Clip setback polygon to property boundary to ensure containment
+            # This handles cases where corner intersections or buffer(0) created geometry outside
+            try:
+                clipped_setback = setback_poly.intersection(prop_poly)
+                
+                # Handle MultiPolygon result
+                if hasattr(clipped_setback, 'geoms'):
+                    # Take the largest polygon from intersection
+                    clipped_setback = max(clipped_setback.geoms, key=lambda g: g.area if hasattr(g, 'area') else 0)
+                
+                if not isinstance(clipped_setback, Polygon) or not clipped_setback.is_valid:
+                    logger.warning("Clipped setback polygon is invalid")
+                    return None
+                
+                # Check if clipped polygon is too small (less than 10% of property area)
+                clipped_area_sqm = calculate_polygon_area(
+                    [[c[0], c[1]] for c in clipped_setback.exterior.coords[:-1]], 
+                    center_lat
+                )
+                prop_area_sqm = calculate_polygon_area(
+                    [[c[0], c[1]] for c in prop_poly.exterior.coords[:-1]], 
+                    center_lat
+                )
+                
+                if clipped_area_sqm < prop_area_sqm * 0.1:
+                    logger.warning(f"Clipped setback area ({clipped_area_sqm:.2f} m²) is too small (< 10% of property {prop_area_sqm:.2f} m²)")
+                    return None
+                
+                # Use clipped polygon
+                setback_poly = clipped_setback
+                logger.debug(f"Setback polygon clipped to property boundary: {clipped_area_sqm:.2f} m²")
+                
+            except Exception as e:
+                logger.warning(f"Failed to clip setback polygon: {e}")
+                # Fallback: verify containment
+                if not prop_poly.covers(setback_poly):
+                    setback_coords_list = [[c[0], c[1]] for c in setback_poly.exterior.coords[:-1]]
+                    prop_coords_list = [[c[0], c[1]] for c in prop_poly.exterior.coords[:-1]]
+                    setback_area_sqm = calculate_polygon_area(setback_coords_list, center_lat)
+                    prop_area_sqm = calculate_polygon_area(prop_coords_list, center_lat)
+                    logger.warning(f"Setback polygon is not fully contained within property boundary")
+                    logger.warning(f"  Setback area: {setback_area_sqm:.2f} m², Property area: {prop_area_sqm:.2f} m²")
+                    logger.warning(f"  This indicates the offset calculation produced invalid geometry - likely corner intersection error")
+                    return None
+            
+            # Additional area check with tolerance for floating point precision
+            setback_coords_list = [[c[0], c[1]] for c in setback_poly.exterior.coords[:-1]]
+            prop_coords_list = [[c[0], c[1]] for c in prop_poly.exterior.coords[:-1]]
+            
+            setback_area_sqm = calculate_polygon_area(setback_coords_list, center_lat)
+            prop_area_sqm = calculate_polygon_area(prop_coords_list, center_lat)
+            
+            # Allow small tolerance (0.5%) for floating point precision
+            tolerance = max(prop_area_sqm * 0.005, 0.1)  # At least 0.1 m² or 0.5% of property area
+            
+            if setback_area_sqm >= (prop_area_sqm - tolerance):
+                logger.warning(f"Setback area ({setback_area_sqm:.2f} m²) >= property area ({prop_area_sqm:.2f} m², tolerance: {tolerance:.2f} m²)")
                 return None
             
             # Extract coordinates

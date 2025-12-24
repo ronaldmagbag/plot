@@ -73,17 +73,17 @@ class PropertyLineClassifier:
                 logger.warning("Property line has too few points for classification")
                 return property_line
             
-            # Step 1: Find closest road from centroid
+            # Step 1: Find closest NAMED road from centroid (skip unnamed roads)
             prop_poly = Polygon(coords_clean)
             centroid = prop_poly.centroid
             centroid_point = Point(centroid.x, centroid.y)
             
-            closest_road, distance_from_road = self._find_closest_road(
+            closest_road, distance_from_road = self._find_closest_named_road(
                 centroid_point, osm_roads
             )
             
             if not closest_road:
-                logger.warning("No roads found for classification")
+                logger.warning("No named roads found for classification")
                 return property_line
             
             road_name = closest_road.get('name', 'Unnamed')
@@ -238,13 +238,14 @@ class PropertyLineClassifier:
             traceback.print_exc()
             return property_line
     
-    def _find_closest_road(
+    def _find_closest_named_road(
         self,
         centroid_point: Point,
         osm_roads: List[Dict[str, Any]]
     ) -> Tuple[Optional[Dict[str, Any]], float]:
         """
-        Find the closest road from centroid point
+        Find the closest NAMED road from centroid point
+        Skips unnamed roads or roads without names
         
         Returns:
             Tuple of (closest_road_dict, distance_in_meters)
@@ -256,6 +257,14 @@ class PropertyLineClassifier:
         min_distance = float('inf')
         
         for road in osm_roads:
+            # Skip unnamed roads or roads without names
+            road_name = road.get("name", "").strip()
+            road_name_lower = road_name.lower() if road_name else ""
+            
+            # Skip if road is unnamed, empty, or generic "road"
+            if not road_name or road_name_lower in ["unnamed road", "unnamed", "road", ""]:
+                continue
+            
             centerline = road.get("centerline", {})
             if not centerline:
                 continue
@@ -278,7 +287,7 @@ class PropertyLineClassifier:
                     min_distance = distance_m
                     closest_road = road
             except Exception as e:
-                logger.debug(f"Error processing road {road.get('name', 'unknown')}: {e}")
+                logger.debug(f"Error processing road {road_name}: {e}")
                 continue
         
         return closest_road, min_distance

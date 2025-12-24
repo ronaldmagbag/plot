@@ -586,22 +586,32 @@ def cmd_visualize(args):
                     logger.warning(f"Failed to create road polygon for {road.get('name', 'unknown')}: {e}")
                     xs, ys = zip(*local_r_clipped)
                     ax.plot(xs, ys, color='lightgray', linewidth=width*2, alpha=0.8, zorder=2, solid_capstyle='round')
-                
-                # Center line dashed
+            else:
+                # If polygon creation fails, draw as thick line instead
+                xs, ys = zip(*local_r_clipped)
+                ax.plot(xs, ys, color='lightgray', linewidth=width*2, alpha=0.8, zorder=2, solid_capstyle='round')
+            
+            # Center line dashed (always draw if we have clipped coordinates)
+            if len(local_r_clipped) >= 2:
                 xs, ys = zip(*local_r_clipped)
                 ax.plot(xs, ys, color='white', linewidth=1.5, linestyle='--', alpha=0.9, zorder=3)
             
             # Road name and width label (positioned above road)
-            mid_idx = len(local_r_clipped) // 2
-            if mid_idx < len(local_r_clipped):
-                mid_x, mid_y = local_r_clipped[mid_idx]
-            else:
-                mid_x, mid_y = local_r_clipped[0] if local_r_clipped else (0, 0)
+            # Skip labeling for unnamed roads - ALWAYS check this even if polygon failed
             road_name = road.get("name", "Road")
-            ax.annotate(f"{road_name}\n(width: {width}m)", 
-                       (mid_x, mid_y + half_width + 2), 
-                       fontsize=8, color='dimgray', ha='center', va='bottom',
-                       fontweight='bold', zorder=10)
+            road_name_lower = road_name.lower().strip()
+            # Skip if road is unnamed or empty
+            if road_name_lower and road_name_lower not in ["unnamed road", "unnamed", "road", ""]:
+                if len(local_r_clipped) >= 2:
+                    mid_idx = len(local_r_clipped) // 2
+                    if mid_idx < len(local_r_clipped):
+                        mid_x, mid_y = local_r_clipped[mid_idx]
+                    else:
+                        mid_x, mid_y = local_r_clipped[0] if local_r_clipped else (0, 0)
+                    ax.annotate(f"{road_name}\n(width: {width}m)", 
+                               (mid_x, mid_y + half_width + 2), 
+                               fontsize=8, color='dimgray', ha='center', va='bottom',
+                               fontweight='bold', zorder=10)
     
     # Store property polygon for distance calculations
     prop_coords_raw = data.get("boundaries", {}).get("property_line", {}).get("coordinates", [[]])[0]
@@ -631,12 +641,42 @@ def cmd_visualize(args):
             dist = building.get("distance_to_property_line_m")
             wall_facing = building.get("wall_facing_plot", "")
             
-            # Label with height and type at building center
+            # Shorten building type for label
+            def shorten_building_type(b_type_str):
+                """Convert building type to short abbreviation"""
+                b_type_lower = b_type_str.lower().strip()
+                if "semi" in b_type_lower and "detached" in b_type_lower:
+                    return "SH"  # Semi-detached House
+                elif "detached" in b_type_lower and "house" in b_type_lower:
+                    return "D"   # Detached house
+                elif "terraced" in b_type_lower or "terrace" in b_type_lower:
+                    return "T"   # Terraced
+                elif "flat" in b_type_lower or "apartment" in b_type_lower:
+                    return "F"   # Flat/Apartment
+                elif "bungalow" in b_type_lower:
+                    return "B"   # Bungalow
+                elif "shed" in b_type_lower:
+                    return "S"   # Shed
+                elif "garage" in b_type_lower:
+                    return "G"   # Garage
+                elif "house" in b_type_lower:
+                    return "H"   # House (generic)
+                else:
+                    # Use first letter of each word, max 2 letters
+                    words = b_type_str.split()
+                    if len(words) == 1:
+                        return words[0][:2].upper()
+                    else:
+                        return "".join([w[0] for w in words[:2]]).upper()
+            
+            # Label with shortened type and height at building center (no box)
             b_center = get_polygon_center(local_b)
-            label_text = f"{height}m\n{b_type}"
-            ax.annotate(label_text, b_center, fontsize=7, ha='center', va='center',
-                       color='white', fontweight='bold', zorder=10,
-                       bbox=dict(boxstyle='round,pad=0.2', facecolor='slategray', alpha=0.8))
+            short_type = shorten_building_type(b_type)
+            # Format: SH6, D7.5, S3 (no decimal if whole number)
+            height_str = f"{int(height)}" if height == int(height) else f"{height:.1f}"
+            label_text = f"{short_type}{height_str}"
+            ax.annotate(label_text, b_center, fontsize=8, ha='center', va='center',
+                       color='white', fontweight='bold', zorder=10)
             
             # Draw distance indicator between building and property line
             if dist is not None and dist > 0 and wall_facing and local_prop_for_dist:
@@ -948,6 +988,23 @@ def cmd_visualize(args):
     ax.text(xlim[0] + (xlim[1]-xlim[0])*0.02, ylim[1] - (ylim[1]-ylim[0])*0.02,
            info_text, transform=ax.transData, fontsize=8, va='top', ha='left',
            bbox=dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='gray'),
+           zorder=10, family='monospace')
+    
+    # Building type abbreviations legend (bottom left)
+    abbrev_text = "Building Types:\n"
+    abbrev_text += "SH = Semi-detached\n"
+    abbrev_text += "D = Detached\n"
+    abbrev_text += "T = Terraced\n"
+    abbrev_text += "F = Flat\n"
+    abbrev_text += "B = Bungalow\n"
+    abbrev_text += "S = Shed\n"
+    abbrev_text += "G = Garage\n"
+    abbrev_text += "H = House\n"
+    abbrev_text += "(Number = height in m)"
+    
+    ax.text(xlim[0] + (xlim[1]-xlim[0])*0.02, ylim[0] + (ylim[1]-ylim[0])*0.02,
+           abbrev_text, transform=ax.transData, fontsize=7, va='bottom', ha='left',
+           bbox=dict(boxstyle='round', facecolor='white', alpha=0.85, edgecolor='gray', pad=0.5),
            zorder=10, family='monospace')
     
     # ============================================================
