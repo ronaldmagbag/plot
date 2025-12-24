@@ -74,7 +74,7 @@ class PipelineConfig:
     """Pipeline configuration"""
     # Search radius around center point (meters)
     # Used for property line detection, surrounding context (roads, buildings, imagery), etc.
-    search_radius_m: float = 20.0
+    search_radius_m: float = 30.0
     
     # Default country
     country: str = "GB"
