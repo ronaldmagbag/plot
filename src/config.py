@@ -53,8 +53,14 @@ class APIConfig:
     # Open-Elevation API
     open_elevation_url: str = "https://api.open-elevation.com/api/v1/lookup"
     
-    # SoilGrids API
+    # SoilGrids API (REST - currently unstable, use WCS instead)
     soilgrids_url: str = "https://rest.isric.org/soilgrids/v2.0/properties/query"
+    # SoilGrids WCS (Web Coverage Service - more stable alternative)
+    # Note: Use .map extension, not .xml
+    soilgrids_wcs_url: str = "https://maps.isric.org/mapserv?map=/map/soilgrids.map"
+    # BGS WMS for UK soil data (fallback for UK locations)
+    # Use UKSO_BGS endpoint (verified working)
+    bgs_wms_url: str = "https://map.bgs.ac.uk/arcgis/services/UKSO/UKSO_BGS/MapServer/WMSServer"
     
     # UK Land Registry INSPIRE
     uk_land_registry_wfs: str = "https://use-land-property-data.service.gov.uk/api/v1/datasets/inspire/download"

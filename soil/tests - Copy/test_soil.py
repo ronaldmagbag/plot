@@ -1,0 +1,15 @@
+import sys
+from pathlib import Path
+
+# Add project root to path
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
+
+from soil import resolve_soil
+
+result = resolve_soil(
+    lat=53.025325345325484,
+    lon=-1.2020914785758279
+)
+
+print(result)

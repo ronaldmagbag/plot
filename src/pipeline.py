@@ -48,6 +48,7 @@ from .collectors import (
     OSMCollector, ElevationCollector, SoilCollector, BoundaryCollector,
     TerrainCollector, VegetationCollector, MapboxImageryCollector
 )
+from .collectors.boundary.utils import calculate_polygon_area
 from .analysis import ShadowAnalyzer, AdjacencyAnalyzer, SetbackCalculator, GeometryUtils
 
 
@@ -484,11 +485,16 @@ class PlotAnalysisPipeline:
             bearing_capacity_kpa=soil_data.get("bearing_capacity_kpa", 150),
             drainage=soil_data.get("drainage", "moderate"),
             foundation_recommendation=soil_data.get("foundation_recommendation", "standard_strip"),
-            source=soil_data.get("source", "soilgrids")
+            source=soil_data.get("source", "soilgrids"),
+            properties=soil_data.get("properties", {})  # Include raw soil properties
         )
         
         # Data quality
-        data_quality = self._build_data_quality(boundary_data)
+        data_quality = self._build_data_quality(
+            boundary_data=boundary_data,
+            soil_data=soil_data,
+            elevation_data=elevation_data
+        )
         
         # Build complete plot analysis
         plot_analysis = PlotAnalysis(
@@ -1530,33 +1536,92 @@ class PlotAnalysisPipeline:
             additional_restrictions=[]
         )
     
-    def _build_data_quality(self, boundary_data: Dict[str, Any]) -> DataQuality:
-        """Build DataQuality model"""
+    def _build_data_quality(
+        self, 
+        boundary_data: Dict[str, Any],
+        soil_data: Dict[str, Any],
+        elevation_data: Dict[str, Any]
+    ) -> DataQuality:
+        """Build DataQuality model with actual data sources used"""
+        
+        # Determine if sources are real data or placeholders
+        def is_real_source(source: str, data_type: str) -> tuple[str, bool]:
+            """Check if source is real data or placeholder. Returns (source_name, is_real)"""
+            placeholder_sources = ["unknown", "default_estimate", "estimated", "placeholder"]
+            
+            if source in placeholder_sources:
+                return f"{source}_placeholder", False
+            
+            # Real data sources mapping
+            real_sources = {
+                # Soil sources
+                "local_uk_soil": ("BGS SPMM 1km (local)", True),
+                "soilgrids_wcs": ("SoilGrids WCS", True),
+                "soilgrids_rest": ("SoilGrids REST API", True),
+                "bgs_wms": ("BGS WMS", True),
+                # Boundary sources
+                "inspire_cadastral": ("INSPIRE Cadastral", True),
+                "inspire_cadastral_merged": ("INSPIRE Cadastral (merged)", True),
+                "openstreetmap": ("OpenStreetMap", True),
+                "openstreetmap_landuse": ("OpenStreetMap Landuse", True),
+                # Elevation sources
+                "mapbox_terrain_rgb": ("Mapbox Terrain RGB", True),
+                "open-meteo": ("Open-Meteo Elevation", True),
+                "open_meteo_elevation": ("Open-Meteo Elevation", True),
+            }
+            
+            if source in real_sources:
+                return real_sources[source]
+            
+            # Default: assume real if not in placeholder list
+            return source, True
+        
+        # Boundary source
+        boundary_source = boundary_data.get("source", "openstreetmap")
+        boundary_name, boundary_is_real = is_real_source(boundary_source, "boundary")
+        
+        # Soil source
+        soil_source = soil_data.get("source", "unknown")
+        soil_name, soil_is_real = is_real_source(soil_source, "soil")
+        
+        # Elevation source (check both dem_source and dem_reference.source)
+        elevation_source = (
+            elevation_data.get("dem_source") or 
+            elevation_data.get("dem_reference", {}).get("source", "unknown")
+        )
+        elevation_name, elevation_is_real = is_real_source(elevation_source, "elevation")
+        
+        # Get elevation resolution
+        elevation_resolution = (
+            elevation_data.get("resolution_m") or
+            elevation_data.get("dem_reference", {}).get("resolution_m")
+        )
         
         sources = [
             DataSource(
                 type="boundary",
-                source=boundary_data.get("source", "openstreetmap"),
-                date=datetime.utcnow().strftime("%Y-%m-%d"),
-                accuracy_m=boundary_data.get("accuracy_m", 5.0)
+                source=boundary_name if boundary_is_real else "placeholder",
+                date=datetime.utcnow().strftime("%Y-%m-%d") if boundary_is_real else None,
+                accuracy_m=boundary_data.get("accuracy_m") if boundary_is_real else None
             ),
             DataSource(
                 type="buildings",
-                source="openstreetmap",
+                source="openstreetmap",  # Always from OSM
                 date=datetime.utcnow().strftime("%Y-%m-%d")
             ),
             DataSource(
                 type="elevation",
-                source="open-meteo",
-                resolution_m=90.0
+                source=elevation_name if elevation_is_real else "placeholder",
+                resolution_m=elevation_resolution if elevation_is_real else None
             ),
             DataSource(
                 type="soil",
-                source="soilgrids_isric"
+                source=soil_name if soil_is_real else "placeholder"
             ),
             DataSource(
                 type="roads",
-                source="openstreetmap"
+                source="openstreetmap",  # Always from OSM
+                date=datetime.utcnow().strftime("%Y-%m-%d")
             )
         ]
         
