@@ -19,6 +19,7 @@ except ImportError:
 
 from .models import PropertyLine, PropertyLineSegment, SegmentType
 from .utils import calculate_line_length, haversine_distance
+from ...config import get_config
 
 
 class PropertyLineClassifier:
@@ -40,15 +41,22 @@ class PropertyLineClassifier:
         Classify property line into front, rear, and side segments
         
         Algorithm:
-        1. Find closest road from centroid point, calculate distance_from_road
-        2. For each edge:
-           a. Find closest road line segment from selected road
-           b. Calculate angle between edge and road line (-90 to 90 degrees)
+        1. Find closest named road from centroid point, calculate distance_from_road
+        2. Merge all road segments with the same name into one road
+        3. Find the closest road segment from the merged road to the centroid (once for all edges)
+        4. For each edge:
+           a. Use the same pre-selected road segment for all edges
+           b. Calculate angle between edge and road segment (-90 to 90 degrees)
            c. Calculate minimum distance (edge line to road segment)
-        3. Classification:
-           - If angle in -20 to 20 degrees: front or rear
+        5. Convert angles to absolute values (0~90 degrees):
+           a. Convert all raw angles (-90~90) to absolute values (0~90)
+        6. Normalize absolute angles:
+           a. Find the edge with minimum absolute angle (most parallel to road, in 0~90 range)
+           b. Subtract this minimum from all absolute angles (normalize so minimum becomes 0)
+        7. Classification using normalized absolute angles:
+           - If normalized absolute angle <= configured threshold (default 30 degrees): front or rear
            - Otherwise: side edge
-        4. For front/rear edges:
+        7. For front/rear edges:
            - If min_distance < distance_from_road: front
            - If min_distance >= distance_from_road: rear
         
@@ -86,19 +94,80 @@ class PropertyLineClassifier:
                 logger.warning("No named roads found for classification")
                 return property_line
             
+            # Get angle threshold from config
+            config = get_config()
+            angle_threshold = config.uk_regulatory.classifier_parallel_angle_threshold
+            
             road_name = closest_road.get('name', 'Unnamed')
             
             # Merge all road segments with the same name into one road
             merged_road = self._merge_roads_by_name(road_name, osm_roads, closest_road)
             
+            # Find the closest road segment from the merged road to the centroid (once for all edges)
+            closest_road_segment, closest_segment_idx = self._find_closest_road_segment_to_point(
+                merged_road, centroid_point
+            )
+            
             if debug:
                 logger.info(f"=== PROPERTY LINE CLASSIFICATION DEBUG ===")
+                logger.info(f"Using angle threshold: ±{angle_threshold}° (from config)")
                 logger.info(f"Closest road: {road_name}, centroid-to-road distance: {distance_from_road:.2f}m")
                 logger.info(f"Merged {len([r for r in osm_roads if r.get('name') == road_name])} segments into one road")
+                if closest_road_segment:
+                    road_coords = merged_road.get("centerline", {}).get("coordinates", [])
+                    if closest_segment_idx >= 0 and closest_segment_idx < len(road_coords) - 1:
+                        seg_start = road_coords[closest_segment_idx]
+                        seg_end = road_coords[closest_segment_idx + 1]
+                        logger.info(f"Selected road segment {closest_segment_idx} for all edges:")
+                        logger.info(f"  Segment start: ({seg_start[0]:.6f}, {seg_start[1]:.6f})")
+                        logger.info(f"  Segment end:   ({seg_end[0]:.6f}, {seg_end[1]:.6f})")
                 logger.info(f"Property line has {len(coords_clean)} edges")
                 logger.info("")
             
-            # Step 2: Classify each edge
+            if closest_road_segment is None:
+                logger.warning("No road segment found from merged road - cannot classify")
+                return property_line
+            
+            # Step 2: First pass - calculate all angles and distances for all edges
+            edge_data = []  # Store raw angle, absolute angle, distance, and edge info
+            
+            for i in range(len(coords_clean)):
+                j = (i + 1) % len(coords_clean)
+                edge_start = coords_clean[i]
+                edge_end = coords_clean[j]
+                edge_line = LineString([edge_start, edge_end])
+                
+                # Calculate angle and distance using the pre-selected road segment
+                raw_angle, min_distance = self._analyze_edge_road_relationship(
+                    edge_line, closest_road_segment, edge_index=i, debug=False
+                )
+                
+                # Convert to absolute angle (0~90)
+                abs_angle = abs(raw_angle)
+                
+                edge_data.append({
+                    "index": i,
+                    "start": edge_start,
+                    "end": edge_end,
+                    "edge_line": edge_line,
+                    "raw_angle": raw_angle,
+                    "abs_angle": abs_angle,
+                    "min_distance": min_distance
+                })
+            
+            # Find the minimum absolute angle (most parallel edge, now in 0~90 range)
+            if not edge_data:
+                logger.warning("No edge data found")
+                return property_line
+            
+            min_abs_angle = min(edge["abs_angle"] for edge in edge_data)
+            
+            if debug:
+                logger.info(f"Minimum absolute angle found: {min_abs_angle:.2f}°")
+                logger.info(f"Normalizing all absolute angles by subtracting {min_abs_angle:.2f}°")
+                logger.info("")
+            
+            # Step 3: Normalize all absolute angles and classify
             front_edge_indices = []
             rear_edge_indices = []
             side_edge_indices = []
@@ -106,11 +175,16 @@ class PropertyLineClassifier:
             # Store debug info for each edge
             edge_debug_info = []
             
-            for i in range(len(coords_clean)):
-                j = (i + 1) % len(coords_clean)
-                edge_start = coords_clean[i]
-                edge_end = coords_clean[j]
-                edge_line = LineString([edge_start, edge_end])
+            for edge in edge_data:
+                i = edge["index"]
+                edge_start = edge["start"]
+                edge_end = edge["end"]
+                raw_angle = edge["raw_angle"]
+                abs_angle = edge["abs_angle"]
+                min_distance = edge["min_distance"]
+                
+                # Normalize absolute angle by subtracting the minimum absolute angle
+                normalized_abs_angle = abs_angle - min_abs_angle
                 
                 # Calculate edge length for logging
                 edge_length = math.sqrt(
@@ -128,49 +202,38 @@ class PropertyLineClassifier:
                     logger.info(f"  Start: ({edge_start[0]:.6f}, {edge_start[1]:.6f})")
                     logger.info(f"  End:   ({edge_end[0]:.6f}, {edge_end[1]:.6f})")
                     logger.info(f"  Length: {edge_length_m:.2f}m")
-                
-                # Find closest road line segment and calculate angle
-                # Use merged_road instead of closest_road
-                closest_road_segment, angle, min_distance = self._analyze_edge_road_relationship(
-                    edge_line, merged_road, edge_index=i, debug=debug
-                )
-                
-                if closest_road_segment is None:
-                    # Can't determine - classify as side
-                    if debug:
-                        logger.info(f"  ❌ No closest road segment found - classifying as SIDE")
-                        logger.info("")
-                    side_edge_indices.append(i)
-                    continue
-                
-                if debug:
-                    logger.info(f"  Dating angle: {angle:.2f}°")
+                    logger.info(f"  Raw angle: {raw_angle:.2f}°")
+                    logger.info(f"  Absolute angle: {abs_angle:.2f}°")
+                    logger.info(f"  Normalized absolute angle: {normalized_abs_angle:.2f}° (abs - {min_abs_angle:.2f}°)")
                     logger.info(f"  Minimum distance (edge to road segment): {min_distance:.2f}m")
                     logger.info(f"  Centroid-to-road distance: {distance_from_road:.2f}m")
                 
-                # Classification based on angle
-                if -20 <= angle <= 20:
+                # Classification based on normalized absolute angle (using config threshold)
+                # Since we're using absolute angles, we only check if normalized_abs_angle <= threshold
+                if normalized_abs_angle <= angle_threshold:
                     # Front or rear edge (parallel to road)
                     if min_distance < distance_from_road:
                         classification = "FRONT"
-                        reason = f"angle={angle:.2f}° (parallel, -20° to 20°) AND min_distance={min_distance:.2f}m < centroid_distance={distance_from_road:.2f}m"
+                        reason = f"normalized_abs_angle={normalized_abs_angle:.2f}° (parallel, <= {angle_threshold}°) AND min_distance={min_distance:.2f}m < centroid_distance={distance_from_road:.2f}m"
                         front_edge_indices.append(i)
                     else:
                         classification = "REAR"
-                        reason = f"angle={angle:.2f}° (parallel, -20° to 20°) AND min_distance={min_distance:.2f}m >= centroid_distance={distance_from_road:.2f}m"
+                        reason = f"normalized_abs_angle={normalized_abs_angle:.2f}° (parallel, <= {angle_threshold}°) AND min_distance={min_distance:.2f}m >= centroid_distance={distance_from_road:.2f}m"
                         rear_edge_indices.append(i)
                 else:
                     # Side edge (perpendicular to road)
                     classification = "SIDE"
-                    reason = f"angle={angle:.2f}° (NOT parallel, outside -20° to 20° range)"
+                    reason = f"normalized_abs_angle={normalized_abs_angle:.2f}° (NOT parallel, > {angle_threshold}°)"
                     side_edge_indices.append(i)
                 
-                # Store debug info
+                # Store debug info (include raw, absolute, and normalized absolute angles)
                 edge_debug_info.append({
                     "edge_index": i,
                     "start": edge_start,
                     "end": edge_end,
-                    "angle": angle,
+                    "raw_angle": raw_angle,
+                    "abs_angle": abs_angle,
+                    "normalized_abs_angle": normalized_abs_angle,
                     "min_distance": min_distance,
                     "distance_from_road": distance_from_road,
                     "classification": classification,
@@ -383,33 +446,30 @@ class PropertyLineClassifier:
         
         return merged_road
     
-    def _analyze_edge_road_relationship(
+    def _find_closest_road_segment_to_point(
         self,
-        edge_line: LineString,
         road: Dict[str, Any],
-        edge_index: Optional[int] = None,
-        debug: bool = False
-    ) -> Tuple[Optional[LineString], float, float]:
+        point: Point
+    ) -> Tuple[Optional[LineString], int]:
         """
-        Analyze relationship between edge and road
+        Find the closest road segment from the merged road to a point (e.g., centroid)
         
-        Algorithm:
-        1. Find closest road line segment to the edge
-        2. Calculate angle between edge and road line (-90 to 90 degrees)
-        3. Calculate minimum distance (edge line to road segment)
+        Args:
+            road: Merged road dictionary with centerline coordinates
+            point: Point to find closest segment to (e.g., property centroid)
         
         Returns:
-            Tuple of (closest_road_segment, angle_degrees, min_distance_meters)
+            Tuple of (closest_road_segment_linestring, segment_index)
         """
         centerline = road.get("centerline", {})
         if not centerline:
-            return None, 0.0, float('inf')
+            return None, -1
         
         road_coords = centerline.get("coordinates", [])
         if len(road_coords) < 2:
-            return None, 0.0, float('inf')
+            return None, -1
         
-        # Find closest road segment to the edge
+        # Find closest road segment to the point
         closest_segment = None
         min_distance_deg = float('inf')
         closest_segment_idx = -1
@@ -417,19 +477,48 @@ class PropertyLineClassifier:
         # Check each segment of the road
         for i in range(len(road_coords) - 1):
             road_segment = LineString([road_coords[i], road_coords[i + 1]])
-            distance = edge_line.distance(road_segment)
+            distance = point.distance(road_segment)
             
             if distance < min_distance_deg:
                 min_distance_deg = distance
                 closest_segment = road_segment
                 closest_segment_idx = i
         
-        if closest_segment is None:
-            return None, 0.0, float('inf')
+        return closest_segment, closest_segment_idx
+    
+    def _analyze_edge_road_relationship(
+        self,
+        edge_line: LineString,
+        road_segment: LineString,
+        edge_index: Optional[int] = None,
+        debug: bool = False
+    ) -> Tuple[float, float]:
+        """
+        Analyze relationship between edge and a pre-selected road segment
         
-        # Log road segment details
-        road_seg_start = road_coords[closest_segment_idx]
-        road_seg_end = road_coords[closest_segment_idx + 1]
+        Algorithm:
+        1. Calculate angle between edge and road segment (-90 to 90 degrees)
+        2. Calculate minimum distance (edge line to road segment)
+        
+        Args:
+            edge_line: Property line edge as LineString
+            road_segment: Pre-selected road segment as LineString (same for all edges)
+            edge_index: Optional edge index for debugging
+            debug: Enable debug logging
+        
+        Returns:
+            Tuple of (angle_degrees, min_distance_meters)
+        """
+        if road_segment is None or len(road_segment.coords) < 2:
+            return 0.0, float('inf')
+        
+        # Calculate minimum distance from edge to road segment
+        min_distance_deg = edge_line.distance(road_segment)
+        
+        # Get road segment coordinates for distance conversion
+        road_seg_coords = list(road_segment.coords)
+        road_seg_start = road_seg_coords[0]
+        road_seg_end = road_seg_coords[-1]
         avg_lat = (road_seg_start[1] + road_seg_end[1]) / 2
         m_per_deg_lat = 111000
         m_per_deg_lon = 111000 * abs(math.cos(math.radians(avg_lat)))
@@ -437,15 +526,15 @@ class PropertyLineClassifier:
         min_distance_m = min_distance_deg * m_per_deg
         
         if debug:
-            logger.info(f"  Closest road segment: segment {closest_segment_idx}")
+            logger.info(f"  Using pre-selected road segment for all edges")
             logger.info(f"    Road segment start: ({road_seg_start[0]:.6f}, {road_seg_start[1]:.6f})")
             logger.info(f"    Road segment end:   ({road_seg_end[0]:.6f}, {road_seg_end[1]:.6f})")
             logger.info(f"    Minimum distance (edge to road segment): {min_distance_m:.2f}m")
         
-        # Calculate angle between edge and road line
-        angle = self._calculate_angle_between_lines(edge_line, closest_segment, debug=debug)
+        # Calculate angle between edge and road segment
+        angle = self._calculate_angle_between_lines(edge_line, road_segment, debug=debug)
         
-        return closest_segment, angle, min_distance_m
+        return angle, min_distance_m
     
     def _calculate_angle_between_lines(
         self,

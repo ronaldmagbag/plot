@@ -35,6 +35,11 @@ class UKRegulatory:
     property_line_max_area_sqm: float = 2000.0  # If property > this, use OSM logic
     property_line_max_perimeter_m: float = 200.0  # If perimeter > this, use OSM logic
     property_line_min_side_distance_m: float = 3.0  # If side distance < this, consider merging
+    
+    # Property line classifier angle thresholds (degrees)
+    # Edges with angle within this range (relative to road) are classified as front/rear
+    # Edges outside this range are classified as side edges
+    classifier_parallel_angle_threshold: float = 20.0  # ±20 degrees for front/rear classification
 
 
 @dataclass 
@@ -74,7 +79,7 @@ class PipelineConfig:
     """Pipeline configuration"""
     # Search radius around center point (meters)
     # Used for property line detection, surrounding context (roads, buildings, imagery), etc.
-    search_radius_m: float = 30.0
+    search_radius_m: float = 40.0
     
     # Default country
     country: str = "GB"

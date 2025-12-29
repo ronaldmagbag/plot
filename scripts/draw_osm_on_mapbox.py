@@ -34,21 +34,93 @@ except ImportError:
 
 from loguru import logger
 
+try:
+    from pyproj import Transformer
+    HAS_PYPROJ = True
+except ImportError:
+    HAS_PYPROJ = False
+    logger.warning("pyproj not available - will use approximate WGS84 interpolation (less accurate)")
+
+
+def wgs84_to_web_mercator(lon: float, lat: float) -> Tuple[float, float]:
+    """
+    Convert WGS84 (EPSG:4326) to Web Mercator (EPSG:3857)
+    
+    Args:
+        lon: Longitude in degrees
+        lat: Latitude in degrees
+    
+    Returns:
+        (x, y) in Web Mercator meters
+    """
+    if HAS_PYPROJ:
+        transformer = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
+        x, y = transformer.transform(lon, lat)
+        return x, y
+    else:
+        # Fallback: approximate conversion (less accurate but no dependency)
+        import math
+        x = lon * 111320.0 * math.cos(math.radians(lat))
+        y = lat * 110540.0
+        return x, y
+
 
 def lon_to_pixel(lon: float, bbox: Dict[str, float], image_width: int) -> int:
-    """Convert longitude to pixel X coordinate in image"""
+    """
+    Convert longitude to pixel X coordinate in image using Web Mercator projection
+    
+    Args:
+        lon: Longitude in WGS84 (degrees)
+        bbox: Bounding box dict with 'west' and 'east' keys (degrees)
+        image_width: Width of image in pixels
+    
+    Returns:
+        Pixel X coordinate (0 to image_width-1)
+    """
     if bbox["east"] == bbox["west"]:
         return image_width // 2
-    ratio = (lon - bbox["west"]) / (bbox["east"] - bbox["west"])
+    
+    # Convert to Web Mercator for accurate projection
+    x_west, _ = wgs84_to_web_mercator(bbox["west"], (bbox["north"] + bbox["south"]) / 2)
+    x_east, _ = wgs84_to_web_mercator(bbox["east"], (bbox["north"] + bbox["south"]) / 2)
+    x_point, _ = wgs84_to_web_mercator(lon, (bbox["north"] + bbox["south"]) / 2)
+    
+    # Linear interpolation in Web Mercator space
+    if x_east == x_west:
+        return image_width // 2
+    
+    ratio = (x_point - x_west) / (x_east - x_west)
     pixel_x = int(ratio * image_width)
     return max(0, min(pixel_x, image_width - 1))
 
 
 def lat_to_pixel(lat: float, bbox: Dict[str, float], image_height: int) -> int:
-    """Convert latitude to pixel Y coordinate in image (Y increases downward)"""
+    """
+    Convert latitude to pixel Y coordinate in image using Web Mercator projection
+    Note: Image Y increases downward, but latitude increases upward.
+    
+    Args:
+        lat: Latitude in WGS84 (degrees)
+        bbox: Bounding box dict with 'south' and 'north' keys (degrees)
+        image_height: Height of image in pixels
+    
+    Returns:
+        Pixel Y coordinate (0 to image_height-1)
+    """
     if bbox["north"] == bbox["south"]:
         return image_height // 2
-    ratio = (bbox["north"] - lat) / (bbox["north"] - bbox["south"])
+    
+    # Convert to Web Mercator for accurate projection
+    center_lon = (bbox["west"] + bbox["east"]) / 2
+    _, y_north = wgs84_to_web_mercator(center_lon, bbox["north"])
+    _, y_south = wgs84_to_web_mercator(center_lon, bbox["south"])
+    _, y_point = wgs84_to_web_mercator(center_lon, lat)
+    
+    # Linear interpolation in Web Mercator space (inverted because Y increases downward)
+    if y_north == y_south:
+        return image_height // 2
+    
+    ratio = (y_north - y_point) / (y_north - y_south)
     pixel_y = int(ratio * image_height)
     return max(0, min(pixel_y, image_height - 1))
 

@@ -11,10 +11,10 @@ from pathlib import Path
 from loguru import logger
 from typing import List, Dict, Any, Tuple
 
-# Add src to path
+# Add project root to path
 # __file__ is at tests/debug_classifier.py, so go up one level to project root
 project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root / "src"))
+sys.path.insert(0, str(project_root))
 
 from src.collectors.boundary.models import PropertyLine
 from src.collectors.boundary.classifier import PropertyLineClassifier
