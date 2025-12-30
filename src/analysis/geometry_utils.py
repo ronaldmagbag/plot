@@ -67,6 +67,10 @@ class GeometryUtils:
         if coords[0] == coords[-1]:
             n -= 1
         
+        # Guard against division by zero
+        if n <= 0:
+            return (coords[0][0] if coords else 0, coords[0][1] if coords else 0)
+        
         sum_x = sum(c[0] for c in coords[:n])
         sum_y = sum(c[1] for c in coords[:n])
         
@@ -196,6 +200,7 @@ class GeometryUtils:
                 # Calculate intersection parameter
                 dx = p2[0] - p1[0]
                 dy = p2[1] - p1[1]
+                # cross is already checked to be non-zero above
                 t = (dx * d2[1] - dy * d2[0]) / cross
                 
                 # Limit t to prevent extreme values at sharp corners

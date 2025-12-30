@@ -141,77 +141,143 @@ class PlotAnalysisPipeline:
         # This avoids a separate API call and uses the same data
         all_osm_features_preview = self.osm_collector.fetch_all_features(lat, lon, radius)
         osm_buildings_preview = all_osm_features_preview.get("buildings", [])
-        osm_landuse_preview = all_osm_features_preview.get("landuse", [])
-        
-        # Try to get boundary from OSM data first
-        boundary_data = None
-        if osm_landuse_preview:
-            # Try landuse polygons
-            for landuse in osm_landuse_preview:
-                geom = landuse.get("geometry", {})
-                if geom.get("type") == "Polygon":
-                    coords = geom.get("coordinates", [[]])[0]
-                    if coords and len(coords) >= 4:
-                        # Check if point is in polygon
-                        if self._point_in_polygon_degrees(lon, lat, coords):
-                            boundary_data = self.boundary_collector._create_boundary_from_coords(
-                                coords, "openstreetmap_landuse", 2.0
-                            )
-                            break
         
         # Get roads for boundary derivation
         osm_roads_preview = all_osm_features_preview.get("roads", [])
         
-        # Try boundary collector with OSM data (roads, buildings, and landuse) for better boundary detection
-        # This allows deriving boundaries from roads and neighbor buildings, not just rectangles
-        # Pass landuse data to avoid separate API call
-        # Get property line object (will be reused later for classification to avoid duplicate detection)
+        # PRIORITY: Try INSPIRE/cadastral data FIRST (most accurate)
+        # This ensures we use the most accurate property boundary available
+        boundary_data = None
         property_line_obj_stage1 = None
-        if not boundary_data:
-            # Get property line without classification first (for initial boundary)
-            # This will be reused in STAGE 3 with classification to avoid duplicate INSPIRE queries
-            property_line_obj_stage1 = self.boundary_collector.get_property_line(
-                lat, lon, radius,
-                osm_buildings=osm_buildings_preview,
-                osm_roads=osm_roads_preview,
-                osm_landuse=osm_landuse_preview,
-                classify=False  # Don't classify yet, will do it later with full data
-            )
-            
-            if property_line_obj_stage1:
-                # Convert to old format for compatibility
-                boundary_data = {
-                    "type": "Polygon",
-                    "coordinates": [property_line_obj_stage1.coordinates],
-                    "area_sqm": property_line_obj_stage1.area_sqm,
-                    "perimeter_m": property_line_obj_stage1.perimeter_m,
-                    "source": property_line_obj_stage1.source,
-                    "accuracy_m": property_line_obj_stage1.accuracy_m,
-                    "inspire_id": property_line_obj_stage1.inspire_id
-                }
-            else:
-                # Fallback: try OSM-based boundary detection (without calling get_property_line again)
-                # This avoids duplicate INSPIRE queries
-                logger.info("Property line detection returned None, trying OSM fallback methods...")
-                # Try OSM landuse first (already checked above, but try again)
-                if osm_landuse_preview:
-                    for landuse in osm_landuse_preview:
-                        geom = landuse.get("geometry", {})
-                        if geom.get("type") == "Polygon":
-                            coords = geom.get("coordinates", [[]])[0]
-                            if coords and len(coords) >= 4:
-                                if self._point_in_polygon_degrees(lon, lat, coords):
-                                    boundary_data = self.boundary_collector._create_boundary_from_coords(
-                                        coords, "openstreetmap_landuse", 2.0
-                                    )
-                                    break
-                
-                # If still no boundary, use default plot estimate
-                if not boundary_data:
-                    logger.info("Using default rectangular plot estimate for property boundary")
-                    boundary_data = self.boundary_collector._create_default_plot(lat, lon)
         
-        property_coords = boundary_data.get("coordinates", [[]])[0]
+        # Try boundary collector with OSM data (roads and buildings) for better boundary detection
+        # This allows deriving boundaries from roads and neighbor buildings, not just rectangles
+        # Get property line object (will be reused later for classification to avoid duplicate detection)
+        # Get property line without classification first (for initial boundary)
+        # This will be reused in STAGE 3 with classification to avoid duplicate INSPIRE queries
+        property_line_obj_stage1 = self.boundary_collector.get_property_line(
+            lat, lon, radius,
+            osm_buildings=osm_buildings_preview,
+            osm_roads=osm_roads_preview,
+            classify=False  # Don't classify yet, will do it later with full data
+        )
+        
+        if property_line_obj_stage1:
+            # Convert to old format for compatibility
+            boundary_data = {
+                "type": "Polygon",
+                "coordinates": [property_line_obj_stage1.coordinates],
+                "area_sqm": property_line_obj_stage1.area_sqm,
+                "perimeter_m": property_line_obj_stage1.perimeter_m,
+                "source": property_line_obj_stage1.source,
+                "accuracy_m": property_line_obj_stage1.accuracy_m,
+                "inspire_id": property_line_obj_stage1.inspire_id
+            }
+            logger.info(f"Using property line from {property_line_obj_stage1.source} (area: {property_line_obj_stage1.area_sqm:.1f} m²)")
+        else:
+            # If no boundary found, use default plot estimate
+            logger.info("Property line detection returned None, using default rectangular plot estimate")
+            boundary_data = self.boundary_collector._create_default_plot(lat, lon)
+        
+        # Extract property coordinates - handle GeoJSON Polygon format
+        coords_raw = boundary_data.get("coordinates", [])
+        source_name = boundary_data.get("source", "unknown")
+        
+        logger.debug(f"Extracting coordinates from source '{source_name}': type={type(coords_raw)}, length={len(coords_raw) if isinstance(coords_raw, list) else 'N/A'}")
+        
+        if not coords_raw:
+            logger.error(f"No coordinates in boundary_data from {source_name}")
+            boundary_data = self.boundary_collector._create_default_plot(lat, lon)
+            coords_raw = boundary_data.get("coordinates", [])
+            source_name = boundary_data.get("source", "unknown")
+        
+        # Extract first coordinate ring from GeoJSON Polygon format
+        # Handle both correct format [[[lon, lat], ...]] and double-wrapped [[[[lon, lat], ...]]]
+        property_coords = []
+        
+        if isinstance(coords_raw, list) and len(coords_raw) > 0:
+            first_element = coords_raw[0]
+            
+            # Check if double-wrapped: [[[[lon, lat], ...]]]
+            if isinstance(first_element, list) and len(first_element) > 0:
+                # Safely check second_element
+                second_element = first_element[0] if len(first_element) > 0 else None
+                
+                # Check if second_element is a list of coordinate pairs (double-wrapped case)
+                if isinstance(second_element, list) and len(second_element) > 0:
+                    # Safely check if second_element contains coordinate pairs
+                    if len(second_element) > 0 and isinstance(second_element[0], list) and len(second_element[0]) == 2:
+                        # Double-wrapped: [[[[lon, lat], ...]]]
+                        # second_element is the actual ring with coordinate pairs
+                        property_coords = second_element
+                        logger.debug(f"Extracted coordinates from double-wrapped format: {len(property_coords)} points")
+                    elif len(first_element) > 0 and isinstance(first_element[0], list) and len(first_element[0]) == 2:
+                        # Correct format: [[[lon, lat], ...]]
+                        property_coords = first_element
+                        logger.debug(f"Extracted coordinates from correct nested format: {len(property_coords)} points")
+                    else:
+                        logger.error(f"Unable to determine coordinate structure")
+                        logger.error(f"  first_element type: {type(first_element)}, length: {len(first_element)}")
+                        logger.error(f"  second_element type: {type(second_element)}, length: {len(second_element) if isinstance(second_element, list) else 'N/A'}")
+                        if isinstance(second_element, list) and len(second_element) > 0:
+                            logger.error(f"  second_element[0] type: {type(second_element[0])}")
+                        property_coords = []
+                elif isinstance(second_element, (int, float)):
+                    # second_element is a number, not a list - this shouldn't happen
+                    logger.error(f"Unexpected: second_element is a number: {second_element}")
+                    property_coords = []
+                elif len(first_element) > 0 and isinstance(first_element[0], list) and len(first_element[0]) == 2:
+                    # Format [[[lon, lat], ...]] - correct GeoJSON Polygon
+                    property_coords = first_element
+                    logger.debug(f"Extracted coordinates from correct format: {len(property_coords)} points")
+                else:
+                    logger.error(f"Unexpected structure")
+                    logger.error(f"  first_element type: {type(first_element)}, length: {len(first_element)}")
+                    if len(first_element) > 0:
+                        logger.error(f"  first_element[0] type: {type(first_element[0])}")
+                    property_coords = []
+            else:
+                logger.error(f"First element is not a valid list: type={type(first_element)}, length={len(first_element) if isinstance(first_element, list) else 'N/A'}")
+                property_coords = []
+        else:
+            logger.error(f"Invalid coordinates structure: type={type(coords_raw)}, length={len(coords_raw) if isinstance(coords_raw, list) else 'N/A'}")
+            property_coords = []
+        
+        # CRITICAL: Final validation - ensure we have valid coordinates
+        if property_coords:
+            # Double-check that property_coords is actually a list of coordinate pairs
+            if not isinstance(property_coords, list):
+                logger.error(f"property_coords is not a list: {type(property_coords)}")
+                property_coords = []
+            elif len(property_coords) > 0:
+                # Check first coordinate is valid
+                first_coord = property_coords[0]
+                if not isinstance(first_coord, list) or len(first_coord) != 2:
+                    logger.error(f"First coordinate is invalid: {first_coord} (type: {type(first_coord)})")
+                    logger.error(f"This suggests coordinate extraction failed. property_coords: {property_coords[:3]}")
+                    property_coords = []
+        
+        # Validate property coordinates
+        if not property_coords or len(property_coords) < 3:
+            logger.error(f"Invalid property coordinates from {source_name}: {len(property_coords) if property_coords else 0} points")
+            logger.error(f"coords_raw type: {type(coords_raw)}, length: {len(coords_raw) if isinstance(coords_raw, list) else 'N/A'}")
+            if isinstance(coords_raw, list) and len(coords_raw) > 0:
+                logger.error(f"coords_raw[0] type: {type(coords_raw[0])}, length: {len(coords_raw[0]) if isinstance(coords_raw[0], list) else 'N/A'}")
+                if isinstance(coords_raw[0], list) and len(coords_raw[0]) > 0:
+                    logger.error(f"coords_raw[0][0] type: {type(coords_raw[0][0])}, value: {coords_raw[0][0]}")
+            logger.error(f"Full coords_raw structure: {coords_raw}")
+            # Fallback to default plot
+            logger.info("Falling back to default rectangular plot estimate")
+            boundary_data = self.boundary_collector._create_default_plot(lat, lon)
+            coords_raw = boundary_data.get("coordinates", [])
+            if isinstance(coords_raw, list) and len(coords_raw) > 0:
+                if isinstance(coords_raw[0], list):
+                    property_coords = coords_raw[0]
+                else:
+                    property_coords = []
+            else:
+                property_coords = []
+        
         property_area = boundary_data.get("area_sqm", 300)
         property_perimeter = boundary_data.get("perimeter_m", 70)
         
@@ -332,12 +398,36 @@ class PlotAnalysisPipeline:
         # ============================================================
         logger.info("Stage 3: Running analysis...")
         
+        # Validate property coordinates
+        if not property_coords or len(property_coords) < 3:
+            logger.error(f"Invalid property coordinates: {len(property_coords) if property_coords else 0} points")
+            raise ValueError(f"Property coordinates must have at least 3 points, got {len(property_coords) if property_coords else 0}")
+        
         # Calculate TRUE centroid of property polygon
-        property_centroid = GeometryUtils.polygon_centroid(property_coords)
-        centroid_lon, centroid_lat = property_centroid
+        try:
+            property_centroid = GeometryUtils.polygon_centroid(property_coords)
+            if not isinstance(property_centroid, (tuple, list)) or len(property_centroid) != 2:
+                logger.error(f"polygon_centroid returned invalid result: {property_centroid} (type: {type(property_centroid)})")
+                raise ValueError(f"Invalid centroid from polygon_centroid: {property_centroid}")
+            centroid_lon, centroid_lat = property_centroid
+        except (ZeroDivisionError, ValueError, TypeError) as e:
+            logger.error(f"Failed to calculate property centroid: {e}")
+            logger.error(f"Property coords: {property_coords[:5] if len(property_coords) > 5 else property_coords}")
+            raise ValueError(f"Failed to calculate property centroid: {e}") from e
         
         # Filter buildings: only keep those OUTSIDE the property boundary
-        ref_lon, ref_lat = property_coords[0] if property_coords else (lon, lat)
+        # Safely extract first coordinate
+        if not property_coords or len(property_coords) == 0:
+            logger.error("property_coords is empty, cannot extract reference point")
+            raise ValueError("Property coordinates are empty")
+        
+        first_coord = property_coords[0]
+        if not isinstance(first_coord, list) or len(first_coord) != 2:
+            logger.error(f"First coordinate is invalid: {first_coord} (type: {type(first_coord)})")
+            logger.error(f"property_coords structure: {property_coords[:3] if len(property_coords) > 3 else property_coords}")
+            raise ValueError(f"Invalid first coordinate: {first_coord}")
+        
+        ref_lon, ref_lat = first_coord
         local_property = GeometryUtils.degrees_to_local(property_coords, ref_lon, ref_lat)
         
         neighbor_buildings = []
@@ -380,7 +470,6 @@ class PlotAnalysisPipeline:
                 lat, lon, radius,
                 osm_buildings=osm_buildings,
                 osm_roads=osm_roads,
-                osm_landuse=osm_landuse_preview,
                 classify=True
             )
         
@@ -405,10 +494,11 @@ class PlotAnalysisPipeline:
                     },
                     "regulation_source": "uk_planning_guidance"
                 }
-                setback_coords = setback_line_obj.coordinates
+                # setback_line_obj.coordinates is [[lon, lat], ...] format
+                # setback_result["coordinates"] is already [[[lon, lat], ...]] (GeoJSON format)
+                # No need to set setback_coords here - it will be extracted from setback_result later
             else:
                 setback_result = None
-                setback_coords = property_coords
             
             if buildable_envelope_obj:
                 buildable_result = {
@@ -748,12 +838,87 @@ class PlotAnalysisPipeline:
             property_line = PropertyLine(**property_line_dict)
         
         # Setback line
-        setback_coords = setback_result["coordinates"] if setback_result else [property_coords]
+        # Extract coordinates - could be from setback_result or fallback to property_coords
+        if setback_result and setback_result.get("coordinates"):
+            # setback_result["coordinates"] is [[[lon, lat], ...]] (GeoJSON Polygon format)
+            # Extract first ring: [[lon, lat], ...]
+            setback_coords_raw = setback_result["coordinates"][0]
+        else:
+            # property_coords is already [[lon, lat], [lon, lat], ...] format
+            setback_coords_raw = property_coords
+        
         setbacks_applied = setback_result.get("setbacks_applied", {}) if setback_result else {}
         
+        # Calculate actual area from coordinates (don't use arbitrary fallback percentages)
+        if setback_result and setback_result.get("area_sqm"):
+            setback_area = setback_result["area_sqm"]
+        else:
+            # Calculate from coordinates if available
+            try:
+                # setback_coords_raw should be [[lon, lat], [lon, lat], ...]
+                if setback_coords_raw and len(setback_coords_raw) > 0:
+                    # Check if it's already in the right format
+                    if isinstance(setback_coords_raw[0], list) and len(setback_coords_raw[0]) >= 2:
+                        # Calculate average latitude from coordinates for area calculation
+                        avg_lat = sum(coord[1] for coord in setback_coords_raw) / len(setback_coords_raw)
+                        setback_area = calculate_polygon_area(setback_coords_raw, avg_lat)
+                    else:
+                        # Unexpected format
+                        logger.error(f"Unexpected setback coordinates format: {type(setback_coords_raw[0])}")
+                        setback_area = 0.0
+                else:
+                    setback_area = 0.0
+                if setback_result is None:
+                    logger.warning(f"Setback calculation failed - calculated area from fallback coordinates: {setback_area:.2f} m²")
+            except Exception as e:
+                logger.error(f"Failed to calculate setback area from coordinates: {e}")
+                setback_area = 0.0  # Mark as invalid/unknown
+        
+        # Ensure coordinates are in GeoJSON Polygon format: [[[lon, lat], ...]]
+        # setback_coords_raw should be [[lon, lat], [lon, lat], ...] (list of coordinate pairs)
+        try:
+            if not setback_coords_raw or len(setback_coords_raw) == 0:
+                logger.warning("No setback coordinates available, using property_coords")
+                setback_coords_formatted = [property_coords]
+            else:
+                first_elem = setback_coords_raw[0]
+                logger.debug(f"Setback coords format check: first element type={type(first_elem)}, value={first_elem if isinstance(first_elem, (int, float)) else 'list'}")
+                
+                if isinstance(first_elem, list):
+                    # Check if it's nested lists (GeoJSON format) or list of pairs
+                    if len(first_elem) > 0 and isinstance(first_elem[0], list):
+                        # Already in GeoJSON format: [[[lon, lat], ...]]
+                        setback_coords_formatted = setback_coords_raw
+                        logger.debug("Setback coords already in GeoJSON format")
+                    elif len(first_elem) >= 2 and isinstance(first_elem[0], (int, float)):
+                        # List of pairs: [[lon, lat], [lon, lat], ...] - wrap in GeoJSON Polygon format
+                        setback_coords_formatted = [setback_coords_raw]
+                        logger.debug(f"Setback coords wrapped: {len(setback_coords_raw)} pairs")
+                    else:
+                        logger.error(f"Unexpected nested format in setback_coords_raw[0]: {type(first_elem[0]) if first_elem else 'empty'}")
+                        setback_coords_formatted = [property_coords]
+                elif isinstance(first_elem, (int, float)):
+                    # Flat list: [lon, lat, lon, lat, ...] - convert to pairs then wrap
+                    if len(setback_coords_raw) % 2 != 0:
+                        logger.error(f"Flat coordinate list has odd length: {len(setback_coords_raw)}")
+                        setback_coords_formatted = [property_coords]
+                    else:
+                        coords_pairs = [[setback_coords_raw[i], setback_coords_raw[i+1]] 
+                                       for i in range(0, len(setback_coords_raw), 2)]
+                        setback_coords_formatted = [coords_pairs]
+                        logger.debug(f"Setback coords converted from flat list: {len(coords_pairs)} pairs")
+                else:
+                    logger.error(f"Unexpected setback coordinates format: first element is {type(first_elem)}")
+                    setback_coords_formatted = [property_coords]
+        except Exception as e:
+            logger.error(f"Error formatting setback coordinates: {e}, using property_coords")
+            import traceback
+            logger.debug(traceback.format_exc())
+            setback_coords_formatted = [property_coords]
+        
         setback_line = SetbackLine(
-            coordinates=setback_coords,
-            area_sqm=setback_result.get("area_sqm", property_area * 0.7) if setback_result else property_area * 0.7,
+            coordinates=setback_coords_formatted,
+            area_sqm=setback_area,
             setbacks_applied=SetbacksApplied(
                 front_m=setbacks_applied.get("front_m", 5.0),
                 rear_m=setbacks_applied.get("rear_m", 5.0),
@@ -764,12 +929,13 @@ class PlotAnalysisPipeline:
         )
         
         # Buildable envelope
-        if buildable_result:
-            buildable_coords = buildable_result["coordinates"]
+        if buildable_result and buildable_result.get("coordinates"):
+            buildable_coords_raw = buildable_result["coordinates"][0]  # Extract first ring from GeoJSON Polygon
             logger.info(f"Using calculated buildable envelope: {buildable_result.get('area_sqm', 0):.2f} m²")
         else:
-            buildable_coords = setback_coords
+            buildable_coords_raw = setback_coords_raw  # Use same format as setback
             logger.warning("Buildable envelope not available - using setback line coordinates as fallback")
+        
         constraints = buildable_result.get("constraints_applied", []) if buildable_result else []
         access_corridor_data = buildable_result.get("access_corridor", {}) if buildable_result else {}
         
@@ -782,9 +948,67 @@ class PlotAnalysisPipeline:
                 affects_buildable_area=access_corridor_data.get("affects_buildable_area", False)
             )
         
+        # Calculate actual area from coordinates (don't use arbitrary fallback percentages)
+        if buildable_result and buildable_result.get("area_sqm"):
+            buildable_area = buildable_result["area_sqm"]
+        else:
+            # Calculate from coordinates if available
+            try:
+                # buildable_coords_raw should be [[lon, lat], [lon, lat], ...]
+                if buildable_coords_raw and len(buildable_coords_raw) > 0:
+                    # Check if it's already in the right format
+                    if isinstance(buildable_coords_raw[0], list) and len(buildable_coords_raw[0]) >= 2:
+                        # Calculate average latitude from coordinates for area calculation
+                        avg_lat = sum(coord[1] for coord in buildable_coords_raw) / len(buildable_coords_raw)
+                        buildable_area = calculate_polygon_area(buildable_coords_raw, avg_lat)
+                    else:
+                        # Unexpected format
+                        logger.error(f"Unexpected buildable coordinates format: {type(buildable_coords_raw[0])}")
+                        buildable_area = 0.0
+                else:
+                    buildable_area = 0.0
+                if buildable_result is None:
+                    logger.warning(f"Buildable envelope calculation failed - calculated area from fallback coordinates: {buildable_area:.2f} m²")
+            except Exception as e:
+                logger.error(f"Failed to calculate buildable area from coordinates: {e}")
+                buildable_area = 0.0  # Mark as invalid/unknown
+        
+        # Ensure coordinates are in GeoJSON Polygon format: [[[lon, lat], ...]]
+        # buildable_coords_raw should be [[lon, lat], [lon, lat], ...] (list of coordinate pairs)
+        try:
+            if not buildable_coords_raw or len(buildable_coords_raw) == 0:
+                logger.warning("No buildable coordinates available, using setback_coords")
+                buildable_coords_formatted = [setback_coords_raw] if setback_coords_raw else [property_coords]
+            elif isinstance(buildable_coords_raw[0], list):
+                # Check if it's nested lists (GeoJSON format) or list of pairs
+                if len(buildable_coords_raw[0]) > 0 and isinstance(buildable_coords_raw[0][0], list):
+                    # Already in GeoJSON format: [[[lon, lat], ...]]
+                    buildable_coords_formatted = buildable_coords_raw
+                elif len(buildable_coords_raw[0]) >= 2 and isinstance(buildable_coords_raw[0][0], (int, float)):
+                    # List of pairs: [[lon, lat], [lon, lat], ...] - wrap in GeoJSON Polygon format
+                    buildable_coords_formatted = [buildable_coords_raw]
+                else:
+                    logger.error(f"Unexpected nested format in buildable_coords_raw[0]: {type(buildable_coords_raw[0][0])}")
+                    buildable_coords_formatted = [setback_coords_raw] if setback_coords_raw else [property_coords]
+            elif isinstance(buildable_coords_raw[0], (int, float)):
+                # Flat list: [lon, lat, lon, lat, ...] - convert to pairs then wrap
+                if len(buildable_coords_raw) % 2 != 0:
+                    logger.error(f"Flat coordinate list has odd length: {len(buildable_coords_raw)}")
+                    buildable_coords_formatted = [setback_coords_raw] if setback_coords_raw else [property_coords]
+                else:
+                    coords_pairs = [[buildable_coords_raw[i], buildable_coords_raw[i+1]] 
+                                   for i in range(0, len(buildable_coords_raw), 2)]
+                    buildable_coords_formatted = [coords_pairs]
+            else:
+                logger.error(f"Unexpected buildable coordinates format: first element is {type(buildable_coords_raw[0])}")
+                buildable_coords_formatted = [setback_coords_raw] if setback_coords_raw else [property_coords]
+        except Exception as e:
+            logger.error(f"Error formatting buildable coordinates: {e}, using setback_coords")
+            buildable_coords_formatted = [setback_coords_raw] if setback_coords_raw else [property_coords]
+        
         buildable_envelope = BuildableEnvelope(
-            coordinates=buildable_coords,
-            area_sqm=buildable_result.get("area_sqm", property_area * 0.6) if buildable_result else property_area * 0.6,
+            coordinates=buildable_coords_formatted,
+            area_sqm=buildable_area,
             constraints_applied=[
                 ConstraintApplied(
                     type=c.get("type", "unknown"),
@@ -1563,7 +1787,6 @@ class PlotAnalysisPipeline:
                 "inspire_cadastral": ("INSPIRE Cadastral", True),
                 "inspire_cadastral_merged": ("INSPIRE Cadastral (merged)", True),
                 "openstreetmap": ("OpenStreetMap", True),
-                "openstreetmap_landuse": ("OpenStreetMap Landuse", True),
                 # Elevation sources
                 "mapbox_terrain_rgb": ("Mapbox Terrain RGB", True),
                 "open-meteo": ("Open-Meteo Elevation", True),

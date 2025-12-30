@@ -386,40 +386,66 @@ def cmd_visualize(args):
         
         return True
     
-    # Calculate view box based on search radius from config
-    # First, try to get search_radius_m from config
-    search_radius = None
+    # Calculate view box based on property line bounds in local coordinates
+    # This ensures the property line is always visible
+    prop_coords = data.get("boundaries", {}).get("property_line", {}).get("coordinates", [[]])[0]
+    VIEW_BBOX = 50.0  # Default fallback
+    
+    if prop_coords:
+        local_prop = to_local(prop_coords)
+        if local_prop:
+            prop_xs = [c[0] for c in local_prop]
+            prop_ys = [c[1] for c in local_prop]
+            if prop_xs and prop_ys:
+                # Calculate bounds of property in local coordinates
+                prop_min_x, prop_max_x = min(prop_xs), max(prop_xs)
+                prop_min_y, prop_max_y = min(prop_ys), max(prop_ys)
+                
+                # Calculate extent (size) of the property
+                prop_extent_x = prop_max_x - prop_min_x
+                prop_extent_y = prop_max_y - prop_min_y
+                prop_max_extent = max(prop_extent_x, prop_extent_y)
+                
+                # Calculate maximum distance from centroid (0,0) to property edge
+                # This accounts for cases where centroid is not perfectly centered
+                prop_max_dist_x = max(abs(prop_min_x), abs(prop_max_x))
+                prop_max_dist_y = max(abs(prop_min_y), abs(prop_max_y))
+                prop_max_dist = max(prop_max_dist_x, prop_max_dist_y)
+                
+                # View box should include the entire property plus padding
+                # Use the larger of: property extent OR distance from centroid to edge
+                # But cap it at a reasonable maximum (e.g., 500m for residential properties)
+                # This prevents huge view boxes for irregularly shaped or misaligned properties
+                base_radius = max(prop_max_extent, prop_max_dist)
+                
+                # Cap at reasonable maximum for residential properties (500m)
+                # If larger, it's likely a data issue or very large property
+                MAX_REASONABLE_RADIUS = 500.0
+                if base_radius > MAX_REASONABLE_RADIUS:
+                    logger.warning(f"Property extent ({base_radius:.1f}m) exceeds reasonable maximum ({MAX_REASONABLE_RADIUS}m). "
+                                 f"Property extent: {prop_max_extent:.1f}m, Max distance from centroid: {prop_max_dist:.1f}m. "
+                                 f"Property bounds: X=[{prop_min_x:.1f}, {prop_max_x:.1f}], Y=[{prop_min_y:.1f}, {prop_max_y:.1f}]. "
+                                 f"Capping view box to {MAX_REASONABLE_RADIUS}m.")
+                    base_radius = MAX_REASONABLE_RADIUS
+                else:
+                    logger.debug(f"Property extent: {prop_max_extent:.1f}m, Max distance from centroid: {prop_max_dist:.1f}m, "
+                               f"Base radius: {base_radius:.1f}m")
+                
+                # Add padding (20% or 20m minimum)
+                padding = max(base_radius * 0.2, 20.0)
+                VIEW_BBOX = base_radius + padding
+    
+    # Also try to get search_radius_m from config as a minimum
     try:
         from src.config import get_config
         config = get_config()
         if hasattr(config, 'search_radius_m') and config.search_radius_m:
-            search_radius = config.search_radius_m
+            # Use the larger of calculated view box or config search radius
+            VIEW_BBOX = max(VIEW_BBOX, config.search_radius_m * 1.2)
     except:
         pass
     
-    # If config not available, calculate from property extent as fallback
-    if search_radius is None:
-        prop_coords = data.get("boundaries", {}).get("property_line", {}).get("coordinates", [[]])[0]
-        if prop_coords:
-            local_prop = to_local(prop_coords)
-            if local_prop:
-                prop_xs = [c[0] for c in local_prop]
-                prop_ys = [c[1] for c in local_prop]
-                prop_extent_x = max(prop_xs) - min(prop_xs) if prop_xs else 0
-                prop_extent_y = max(prop_ys) - min(prop_ys) if prop_ys else 0
-                prop_max_extent = max(prop_extent_x, prop_extent_y)
-                # Use property extent * 1.5 as search radius estimate
-                search_radius = prop_max_extent * 1.5
-            else:
-                search_radius = 50.0  # Final fallback
-        else:
-            search_radius = 50.0  # Final fallback
-    
-    # View box is the search radius plus small padding (10% or 5m minimum)
-    padding = max(search_radius * 0.1, 5.0)
-    VIEW_BBOX = search_radius + padding
-    
-    logger.info(f"Search radius: {search_radius:.1f}m, View box: {VIEW_BBOX * 2:.1f}m x {VIEW_BBOX * 2:.1f}m (centered on centroid)")
+    logger.info(f"View box: {VIEW_BBOX * 2:.1f}m x {VIEW_BBOX * 2:.1f}m (centered on centroid, radius: {VIEW_BBOX:.1f}m)")
     
     # Get property data
     prop_area = data.get("boundaries", {}).get("property_line", {}).get("area_sqm", 0)
@@ -781,7 +807,8 @@ def cmd_visualize(args):
         local_prop = to_local(prop_coords)
         
         # Draw property line with colored segments if available
-        if segments_data:
+        segments_drawn = False
+        if segments_data and any(segments_data.get(k, {}).get("edges") for k in ["front", "rear", "left_side", "right_side"]):
             def reconstruct_coords_from_edges(edge_indices, prop_coords_list):
                 """Reconstruct coordinates from edge indices"""
                 if not edge_indices:
@@ -842,68 +869,102 @@ def cmd_visualize(args):
                 if not edge_indices:
                     return
                 
-                # Group consecutive edges
-                sorted_indices = sorted(edge_indices)
-                edge_groups = []
-                current_group = [sorted_indices[0]]
-                
-                for i in range(1, len(sorted_indices)):
-                    prev_idx = sorted_indices[i - 1]
-                    curr_idx = sorted_indices[i]
-                    prev_end = (prev_idx + 1) % len(prop_coords)
+                try:
+                    # Validate edge indices
+                    max_idx = len(prop_coords) - 1
+                    valid_indices = [idx for idx in edge_indices if 0 <= idx <= max_idx]
+                    if not valid_indices:
+                        logger.warning(f"No valid edge indices for {label}, skipping")
+                        return
                     
-                    if prev_end == curr_idx:
-                        current_group.append(curr_idx)
-                    else:
+                    # Group consecutive edges
+                    sorted_indices = sorted(valid_indices)
+                    edge_groups = []
+                    current_group = [sorted_indices[0]]
+                    
+                    for i in range(1, len(sorted_indices)):
+                        prev_idx = sorted_indices[i - 1]
+                        curr_idx = sorted_indices[i]
+                        prev_end = (prev_idx + 1) % len(prop_coords)
+                        
+                        if prev_end == curr_idx:
+                            current_group.append(curr_idx)
+                        else:
+                            edge_groups.append(current_group)
+                            current_group = [curr_idx]
+                    
+                    if current_group:
                         edge_groups.append(current_group)
-                        current_group = [curr_idx]
-                
-                if current_group:
-                    edge_groups.append(current_group)
-                
-                # Draw each group separately
-                for group in edge_groups:
-                    group_coords = reconstruct_coords_from_edges(group, prop_coords)
-                    if len(group_coords) >= 2:
-                        local_coords = to_local(group_coords)
-                        xs, ys = zip(*local_coords)
-                        # Only add label to first group to avoid duplicate legend entries
-                        ax.plot(xs, ys, color=color, linewidth=2, 
-                               linestyle='-', zorder=5, label=label if group == edge_groups[0] else '', alpha=0.9)
+                    
+                    # Draw each group separately
+                    drawn_any = False
+                    for group in edge_groups:
+                        group_coords = reconstruct_coords_from_edges(group, prop_coords)
+                        if len(group_coords) >= 2:
+                            local_coords = to_local(group_coords)
+                            # Filter coordinates that are within view box (with some margin)
+                            margin = VIEW_BBOX * 1.5
+                            filtered_coords = [(x, y) for x, y in local_coords 
+                                              if -margin <= x <= margin and -margin <= y <= margin]
+                            if len(filtered_coords) >= 2:
+                                xs, ys = zip(*filtered_coords)
+                                # Only add label to first group to avoid duplicate legend entries
+                                ax.plot(xs, ys, color=color, linewidth=2, 
+                                       linestyle='-', zorder=5, label=label if group == edge_groups[0] and not drawn_any else '', alpha=0.9)
+                                drawn_any = True
+                    
+                    if not drawn_any:
+                        logger.warning(f"Could not draw any segments for {label}")
+                except Exception as e:
+                    logger.warning(f"Error drawing {label}: {e}")
+                    # Fallback: draw as single line
+                    return
             
             # Draw each segment with its color - draw all groups
-            if segments_data.get("front"):
-                draw_all_edge_groups(
-                    segments_data["front"].get("edges", []),
-                    segments_data["front"]["color"],
-                    'Front (Road)'
-                )
-            
-            if segments_data.get("rear"):
-                draw_all_edge_groups(
-                    segments_data["rear"].get("edges", []),
-                    segments_data["rear"]["color"],
-                    'Rear'
-                )
-            
-            if segments_data.get("left_side"):
-                draw_all_edge_groups(
-                    segments_data["left_side"].get("edges", []),
-                    segments_data["left_side"]["color"],
-                    'Left Side'
-                )
-            
-            if segments_data.get("right_side"):
-                draw_all_edge_groups(
-                    segments_data["right_side"].get("edges", []),
-                    segments_data["right_side"]["color"],
-                    'Right Side'
-                )
-        else:
-            # Fallback: draw as single green outline
-            poly = MplPolygon(local_prop, fill=False, edgecolor='darkgreen', linewidth=2, 
-                             linestyle='-', zorder=5, label=f'Property Line ({prop_area:.1f}m²)')
-            ax.add_patch(poly)
+            try:
+                if segments_data.get("front"):
+                    draw_all_edge_groups(
+                        segments_data["front"].get("edges", []),
+                        segments_data["front"]["color"],
+                        'Front (Road)'
+                    )
+                    segments_drawn = True
+                
+                if segments_data.get("rear"):
+                    draw_all_edge_groups(
+                        segments_data["rear"].get("edges", []),
+                        segments_data["rear"]["color"],
+                        'Rear'
+                    )
+                    segments_drawn = True
+                
+                if segments_data.get("left_side"):
+                    draw_all_edge_groups(
+                        segments_data["left_side"].get("edges", []),
+                        segments_data["left_side"]["color"],
+                        'Left Side'
+                    )
+                    segments_drawn = True
+                
+                if segments_data.get("right_side"):
+                    draw_all_edge_groups(
+                        segments_data["right_side"].get("edges", []),
+                        segments_data["right_side"]["color"],
+                        'Right Side'
+                    )
+                    segments_drawn = True
+            except Exception as e:
+                logger.warning(f"Error drawing property line segments: {e}")
+                segments_drawn = False
+        
+        # Fallback: draw as single green outline if segments weren't drawn
+        if not segments_drawn:
+            try:
+                poly = MplPolygon(local_prop, fill=False, edgecolor='darkgreen', linewidth=2, 
+                                 linestyle='-', zorder=5, label=f'Property Line ({prop_area:.1f}m²)')
+                ax.add_patch(poly)
+            except Exception as e:
+                logger.error(f"Failed to draw property line polygon: {e}")
     
     # ============================================================
     # LAYER 6: Setback zone (orange dashed)

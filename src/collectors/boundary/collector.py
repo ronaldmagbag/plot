@@ -78,7 +78,6 @@ class BoundaryCollector:
         search_radius_m: float,
         osm_buildings: Optional[List[Dict[str, Any]]] = None,
         osm_roads: Optional[List[Dict[str, Any]]] = None,
-        osm_landuse: Optional[List[Dict[str, Any]]] = None,
         classify: bool = True
     ) -> Optional[PropertyLine]:
         """
@@ -90,7 +89,6 @@ class BoundaryCollector:
             search_radius_m: Search radius in meters
             osm_buildings: Optional OSM building data
             osm_roads: Optional OSM road data
-            osm_landuse: Optional OSM landuse data
             classify: Whether to classify into front/rear/sides
             
         Returns:
@@ -98,7 +96,7 @@ class BoundaryCollector:
         """
         # Get property line
         property_line = self.property_line_processor.get_property_line(
-            lat, lon, search_radius_m, osm_buildings, osm_roads, osm_landuse
+            lat, lon, search_radius_m, osm_buildings, osm_roads  # OSM landuse removed
         )
         
         if not property_line:
@@ -159,7 +157,6 @@ class BoundaryCollector:
         search_radius_m: float,
         osm_buildings: Optional[List[Dict[str, Any]]] = None,
         osm_roads: Optional[List[Dict[str, Any]]] = None,
-        osm_landuse: Optional[List[Dict[str, Any]]] = None
     ) -> Dict[str, Any]:
         """
         Get or estimate plot boundary at given location (backward compatibility)
@@ -171,7 +168,7 @@ class BoundaryCollector:
         """
         # Try to get property line first
         property_line = self.get_property_line(
-            lat, lon, search_radius_m, osm_buildings, osm_roads, osm_landuse, classify=False
+            lat, lon, search_radius_m, osm_buildings, osm_roads, None, classify=False  # OSM landuse removed
         )
         
         if property_line:
@@ -188,32 +185,6 @@ class BoundaryCollector:
         
         # Fallback to OSM-based detection (original logic)
         logger.info("Using OSM-based boundary detection (fallback)")
-        
-        # Strategy 1: Look for landuse polygon
-        if osm_landuse:
-            for landuse in osm_landuse:
-                geom = landuse.get("geometry", {})
-                if geom.get("type") == "Polygon":
-                    coords = geom.get("coordinates", [[]])[0]
-                    if coords and len(coords) >= 4:
-                        if point_roughly_in_polygon(lon, lat, coords):
-                            coords = close_polygon(coords)
-                            area = calculate_polygon_area(coords, lat)
-                            perimeter = calculate_perimeter(coords, lat)
-                            
-                            return {
-                                "type": "Polygon",
-                                "coordinates": [coords],
-                                "area_sqm": area,
-                                "perimeter_m": perimeter,
-                                "source": "openstreetmap_landuse",
-                                "accuracy_m": 2.0,
-                                "osm_id": landuse.get("osm_id")
-                            }
-        else:
-            landuse_boundary = self._find_landuse_boundary(lat, lon, search_radius_m)
-            if landuse_boundary:
-                return landuse_boundary
         
         # Strategy 2: Derive from roads
         if osm_roads:
@@ -235,76 +206,6 @@ class BoundaryCollector:
         # Strategy 5: Default plot
         return self._create_default_plot(lat, lon)
     
-    def _find_landuse_boundary(
-        self,
-        lat: float,
-        lon: float,
-        radius_m: float
-    ) -> Optional[Dict[str, Any]]:
-        """Find landuse=residential polygon containing the point"""
-        import requests
-        
-        logger.debug(f"Searching for landuse boundary at ({lat}, {lon}) within {radius_m}m")
-        self._rate_limit()
-        
-        query = f"""
-        [out:json][timeout:30];
-        (
-            way["landuse"="residential"](around:{radius_m},{lat},{lon});
-            way["landuse"="allotments"](around:{radius_m},{lat},{lon});
-            relation["landuse"="residential"](around:{radius_m},{lat},{lon});
-        );
-        out body;
-        >;
-        out skel qt;
-        """
-        
-        try:
-            response = requests.post(
-                self.overpass_url,
-                data={"data": query},
-                headers={"User-Agent": self.config.api.user_agent},
-                timeout=30
-            )
-            response.raise_for_status()
-            data = response.json()
-            
-            # Parse nodes
-            nodes = {}
-            for element in data.get("elements", []):
-                if element["type"] == "node":
-                    nodes[element["id"]] = (element["lon"], element["lat"])
-            
-            # Find ways
-            for element in data.get("elements", []):
-                if element["type"] == "way":
-                    way_nodes = element.get("nodes", [])
-                    if len(way_nodes) >= 4:
-                        coords = []
-                        for node_id in way_nodes:
-                            if node_id in nodes:
-                                coords.append(list(nodes[node_id]))
-                        
-                        if len(coords) >= 4:
-                            if point_roughly_in_polygon(lon, lat, coords):
-                                coords = close_polygon(coords)
-                                area = calculate_polygon_area(coords, lat)
-                                perimeter = calculate_perimeter(coords, lat)
-                                
-                                return {
-                                    "type": "Polygon",
-                                    "coordinates": [coords],
-                                    "area_sqm": area,
-                                    "perimeter_m": perimeter,
-                                    "source": "openstreetmap_landuse",
-                                    "accuracy_m": 2.0,
-                                    "osm_id": element["id"]
-                                }
-        
-        except Exception as e:
-            logger.warning(f"Landuse boundary search failed: {e}")
-        
-        return None
     
     def _derive_from_roads(
         self,
@@ -452,8 +353,25 @@ class BoundaryCollector:
             footprint = building.get("footprint", {})
             if not footprint:
                 continue
-            b_coords = footprint.get("coordinates", [[]])[0]
+            b_coords_raw = footprint.get("coordinates", [])
+            if not b_coords_raw:
+                logger.debug(f"Building {building.get('osm_id')} has no coordinates in footprint")
+                continue
+            
+            # Extract coordinates - handle GeoJSON Polygon format [[[lon, lat], ...]]
+            if isinstance(b_coords_raw[0], list) and len(b_coords_raw[0]) > 0:
+                if isinstance(b_coords_raw[0][0], list):
+                    # Already in format [[[lon, lat], ...]] - extract first ring
+                    b_coords = b_coords_raw[0]
+                else:
+                    # Format [[lon, lat], ...] - use as is
+                    b_coords = b_coords_raw[0]
+            else:
+                logger.debug(f"Building {building.get('osm_id')} has invalid coordinate format")
+                continue
+            
             if not b_coords or len(b_coords) < 4:
+                logger.debug(f"Building {building.get('osm_id')} has insufficient coordinates: {len(b_coords) if b_coords else 0} points")
                 continue
             
             centroid_lon = sum(c[0] for c in b_coords) / len(b_coords)
@@ -469,20 +387,87 @@ class BoundaryCollector:
                 }
         
         if closest_building and min_distance < radius_m:
-            plot_coords = self._buffer_building_to_plot(closest_building["coords"], lat)
+            building_coords = closest_building["coords"]
+            logger.debug(f"Building coords for buffering: {len(building_coords)} points")
+            
+            plot_coords = self._buffer_building_to_plot(building_coords, lat)
             if plot_coords:
-                area = calculate_polygon_area(plot_coords, lat)
-                perimeter = calculate_perimeter(plot_coords, lat)
+                logger.debug(f"_buffer_building_to_plot returned: type={type(plot_coords)}, length={len(plot_coords) if isinstance(plot_coords, list) else 'N/A'}")
                 
-                return {
-                    "type": "Polygon",
-                    "coordinates": [plot_coords],
-                    "area_sqm": area,
-                    "perimeter_m": perimeter,
-                    "source": "estimated_from_building",
-                    "accuracy_m": 5.0,
-                    "building_osm_id": closest_building["id"]
-                }
+                # Validate plot_coords - must have at least 3 points for a polygon
+                if not isinstance(plot_coords, list):
+                    logger.error(f"Buffered plot coords is not a list: type={type(plot_coords)}")
+                    logger.error(f"Building coords that failed: {len(building_coords)} points")
+                    return None
+                
+                if len(plot_coords) < 3:
+                    logger.error(f"Buffered plot coords has insufficient points: {len(plot_coords)} (expected >= 3)")
+                    logger.error(f"Plot coords content: {plot_coords}")
+                    logger.error(f"Building coords that failed: {len(building_coords)} points")
+                    return None
+                
+                # Validate each coordinate is a list of 2 numbers
+                for i, coord in enumerate(plot_coords):
+                    if not isinstance(coord, list) or len(coord) != 2:
+                        logger.error(f"Invalid coordinate at index {i}: {coord} (type={type(coord)})")
+                        logger.error(f"Full plot_coords: {plot_coords}")
+                        return None
+                
+                try:
+                    area = calculate_polygon_area(plot_coords, lat)
+                    perimeter = calculate_perimeter(plot_coords, lat)
+                    
+                    logger.info(f"Successfully estimated plot from building {closest_building['id']}: {len(plot_coords)} points, {area:.1f} m²")
+                    
+                    # Create result with proper GeoJSON format
+                    # plot_coords is [[lon, lat], [lon, lat], ...] (list of coordinate pairs)
+                    # GeoJSON Polygon format requires: [[[lon, lat], [lon, lat], ...]] (list containing one ring)
+                    result = {
+                        "type": "Polygon",
+                        "coordinates": [plot_coords],  # GeoJSON format: [[[lon, lat], ...]]
+                        "area_sqm": area,
+                        "perimeter_m": perimeter,
+                        "source": "estimated_from_building",
+                        "accuracy_m": 5.0,
+                        "building_osm_id": closest_building["id"]
+                    }
+                    
+                    # Validate the result structure before returning
+                    result_coords = result.get("coordinates", [])
+                    if not result_coords or len(result_coords) == 0:
+                        logger.error(f"Result coordinates is empty after creation!")
+                        logger.error(f"plot_coords had {len(plot_coords)} points before wrapping")
+                        return None
+                    
+                    if not isinstance(result_coords, list):
+                        logger.error(f"Result coordinates is not a list: {type(result_coords)}")
+                        return None
+                    
+                    if len(result_coords) == 0:
+                        logger.error(f"Result coordinates list is empty")
+                        return None
+                    
+                    first_ring = result_coords[0]
+                    if not isinstance(first_ring, list):
+                        logger.error(f"First ring is not a list: {type(first_ring)}")
+                        return None
+                    
+                    if len(first_ring) < 3:
+                        logger.error(f"Result first ring has insufficient points: {len(first_ring)} (expected >= 3)")
+                        logger.error(f"First ring content: {first_ring[:3]}...")
+                        return None
+                    
+                    logger.info(f"Returning property line with {len(first_ring)} points in first ring (source: estimated_from_building)")
+                    return result
+                    
+                except Exception as e:
+                    logger.error(f"Failed to calculate area/perimeter for plot coords: {e}")
+                    logger.error(f"Plot coords: {plot_coords[:3]}... (showing first 3)")
+                    import traceback
+                    logger.debug(traceback.format_exc())
+                    return None
+            else:
+                logger.warning(f"_buffer_building_to_plot returned None for building {closest_building.get('id', 'unknown')}")
         
         return None
     
@@ -491,46 +476,64 @@ class BoundaryCollector:
         building_coords: List[List[float]],
         center_lat: float
     ) -> Optional[List[List[float]]]:
-        """Create plot boundary by buffering building footprint"""
-        if len(building_coords) < 4:
+        """Create plot boundary by buffering building footprint
+        
+        Uses a simple offset method instead of Shapely buffering for reliability.
+        """
+        if not building_coords or len(building_coords) < 4:
+            logger.warning(f"Building coordinates invalid: {len(building_coords) if building_coords else 0} points")
             return None
         
-        if SHAPELY_AVAILABLE:
-            try:
-                coords = close_polygon(building_coords)
-                building_poly = Polygon(coords)
-                
-                min_buffer_m = max(2.0, building_poly.length * 111000 * 0.05)
-                buffered = building_poly.buffer(
-                    min_buffer_m / 111000,
-                    cap_style=3,
-                    join_style=2
-                )
-                
-                if isinstance(buffered, Polygon):
-                    return [[c[0], c[1]] for c in buffered.exterior.coords]
-            except Exception as e:
-                logger.warning(f"Shapely buffering failed: {e}")
+        logger.debug(f"Buffering building with {len(building_coords)} points")
         
-        # Fallback
-        lat_per_m = 1 / 111000
-        lon_per_m = 1 / (111000 * math.cos(math.radians(center_lat)))
-        
-        min_lon = min(c[0] for c in building_coords)
-        max_lon = max(c[0] for c in building_coords)
-        min_lat = min(c[1] for c in building_coords)
-        max_lat = max(c[1] for c in building_coords)
-        
-        buffer_lon = 2.0 * lon_per_m
-        buffer_lat = 5.0 * lat_per_m
-        
-        return [
-            [min_lon - buffer_lon, min_lat - buffer_lat],
-            [max_lon + buffer_lon, min_lat - buffer_lat],
-            [max_lon + buffer_lon, max_lat + buffer_lat],
-            [min_lon - buffer_lon, max_lat + buffer_lat],
-            [min_lon - buffer_lon, min_lat - buffer_lat],
-        ]
+        # Use simple offset method - more reliable than Shapely buffering
+        # Calculate bounding box and expand with buffer
+        try:
+            # Calculate meters per degree at this latitude
+            lat_per_m = 1 / 111000
+            lon_per_m = 1 / (111000 * math.cos(math.radians(center_lat)))
+            
+            # Find bounding box
+            min_lon = min(c[0] for c in building_coords)
+            max_lon = max(c[0] for c in building_coords)
+            min_lat = min(c[1] for c in building_coords)
+            max_lat = max(c[1] for c in building_coords)
+            
+            # Calculate buffer distance (2-5m depending on building size)
+            building_width = (max_lon - min_lon) * 111000 * math.cos(math.radians(center_lat))
+            building_depth = (max_lat - min_lat) * 111000
+            building_perimeter = 2 * (building_width + building_depth)
+            
+            # Buffer: minimum 2m, or 5% of perimeter
+            buffer_m = max(2.0, building_perimeter * 0.05)
+            logger.debug(f"Calculated buffer: {buffer_m:.2f}m (building size: {building_width:.1f}m x {building_depth:.1f}m)")
+            
+            # Convert buffer to degrees
+            buffer_lon = buffer_m * lon_per_m
+            buffer_lat = buffer_m * lat_per_m
+            
+            # Create buffered rectangular plot
+            plot_coords = [
+                [min_lon - buffer_lon, min_lat - buffer_lat],
+                [max_lon + buffer_lon, min_lat - buffer_lat],
+                [max_lon + buffer_lon, max_lat + buffer_lat],
+                [min_lon - buffer_lon, max_lat + buffer_lat],
+                [min_lon - buffer_lon, min_lat - buffer_lat],  # Close polygon
+            ]
+            
+            # Validate result - should always have 5 points (4 corners + closing)
+            if len(plot_coords) < 3:
+                logger.error(f"Generated plot coords only has {len(plot_coords)} points - this should never happen!")
+                return None
+            
+            logger.debug(f"Successfully created buffered plot: {len(plot_coords)} points")
+            return plot_coords
+            
+        except Exception as e:
+            logger.error(f"Failed to buffer building coordinates: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+            return None
     
     def _create_default_plot(self, lat: float, lon: float) -> Dict[str, Any]:
         """Create default rectangular plot at location"""
@@ -572,6 +575,12 @@ class BoundaryCollector:
             return None
         
         coords = close_polygon(coords)
+        
+        # Validate coordinates
+        if len(coords) < 3:
+            logger.warning(f"Coordinates have too few points ({len(coords)}), cannot create boundary")
+            return None
+        
         center_lat = sum(c[1] for c in coords) / len(coords)
         area = calculate_polygon_area(coords, center_lat)
         perimeter = calculate_perimeter(coords, center_lat)

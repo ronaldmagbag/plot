@@ -7,7 +7,7 @@ Modular OSM data collector with separate components for:
 - Parser: Response parsing
 - Buildings: Building-specific logic
 - Roads: Road-specific logic
-- Features: Water, vegetation, trees, landuse parsing
+- Features: Water, vegetation, trees parsing
 - Cache: Caching functionality
 - Collector: Main orchestrator class
 """

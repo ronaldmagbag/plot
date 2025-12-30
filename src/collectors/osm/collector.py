@@ -56,7 +56,7 @@ class OSMCollector:
             radius_m: Search radius in meters
             
         Returns:
-            Dict with keys: 'buildings', 'roads', 'water', 'vegetation_zones', 'trees', 'landuse'
+            Dict with keys: 'buildings', 'roads', 'water', 'vegetation_zones', 'trees'
         """
         # Check cache first
         cache_path = self.cache.get_cache_path(lat, lon, radius_m)
@@ -95,9 +95,6 @@ class OSMCollector:
             // Individual trees
             node["natural"="tree"](around:{radius_m},{lat},{lon});
             
-            // Landuse (for boundary detection)
-            way["landuse"="residential"](around:{radius_m},{lat},{lon});
-            relation["landuse"="residential"](around:{radius_m},{lat},{lon});
         );
         out geom;
         """
@@ -118,7 +115,6 @@ class OSMCollector:
                 "water": [],
                 "vegetation_zones": [],
                 "trees": [],
-                "landuse": []
             }
             
             # Parse buildings (filter out point buildings and merge adjacent/overlapping ones)
@@ -145,8 +141,6 @@ class OSMCollector:
             # Parse vegetation zones
             result["vegetation_zones"] = self.feature_processor.parse_vegetation_zones(ways)
             
-            # Parse landuse
-            result["landuse"] = self.feature_processor.parse_landuse(ways)
             
             # Parse individual trees (from nodes)
             result["trees"] = self.feature_processor.parse_trees(nodes)
@@ -174,7 +168,6 @@ class OSMCollector:
             "water": [],
             "vegetation_zones": [],
             "trees": [],
-            "landuse": []
         }
         
         # Parse buildings
@@ -197,8 +190,6 @@ class OSMCollector:
         # Parse vegetation zones
         result["vegetation_zones"] = self.feature_processor.parse_vegetation_zones(ways)
         
-        # Parse landuse
-        result["landuse"] = self.feature_processor.parse_landuse(ways)
         
         # Parse individual trees
         result["trees"] = self.feature_processor.parse_trees(nodes)

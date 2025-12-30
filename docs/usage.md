@@ -30,15 +30,35 @@ python cli.py generate --lat 53.039579267660336 --lon -1.200269987188616 --outpu
 python cli.py generate --lat 53.02564887164458 --lon -1.201323337676318 --output output\plot_ash4.json
 python cli.py generate --lat 53.029386664827584 --lon -1.212482268566838 --output output\plot_ash5.json
 python cli.py generate --lat 53.0256839932681 --lon -1.2023543953647096 --output output\53.0256839932681-1.2023543953647096.json
-python cli.py generate --lat 53.025325345325484 --lon -1.2020914785758279 --output output\53.025325345325484-1.2020914785758279.json
+
+
+python cli.py generate --lat 53.040554321706324 --lon -1.2056779010008587 --output output\1.json
+python cli.py generate --lat 53.04056394590633 --lon -1.2160624715683674 --output output\2.json
+
+python cli.py generate --lat 53.0403338536591 --lon -1.2192989437839514 --output output\v1.json
+python cli.py generate --lat 53.04085482610178 --lon -1.2190292066583432 --output output\v2.json
+python cli.py generate --lat 53.03993081184168 --lon -1.219092465790886 --output output\v3.json
+python cli.py generate --lat 53.03896051626191 --lon -1.2221818110142328 --output output\v4.json
+python cli.py generate --lat 53.05236708155057 --lon -1.2026009414885899 --output output\v5.json
+
+
+53.040554321706324, -1.2056779010008587
+53.04056394590633, -1.2160624715683674
 
 
 
+53.0403338536591, -1.2192989437839514
+53.04085482610178, -1.2190292066583432
+53.03993081184168, -1.219092465790886
+53.03896051626191, -1.2221818110142328
+53.05236708155057, -1.2026009414885899
 - Visualization Tests
-python cli.py visualize --input output/53.025325345325484-1.2020914785758279.json --output output/53.025325345325484-1.2020914785758279.png
+python cli.py visualize --input output/1.json --output output/1.png
 
 
-python .\tests\debug_classifier.py --input .\output\53.025325345325484-1.2020914785758279.json --lat 53.025325345325484 --lon -1.2020914785758279 
+python .\tests\debug_classifier.py --input .\output\1.json --lat 53.040554321706324 --lon -1.2056779010008587 
+
+python .\tests\debug_classifier.py --input .\output\v1.json --lat 53.0403338536591 --lon -1.2192989437839514 
 
 
 - Mapbox Imagery Tests

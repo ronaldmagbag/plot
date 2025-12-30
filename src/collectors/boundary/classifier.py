@@ -41,24 +41,25 @@ class PropertyLineClassifier:
         Classify property line into front, rear, and side segments
         
         Algorithm:
-        1. Find closest named road from centroid point, calculate distance_from_road
-        2. Merge all road segments with the same name into one road
-        3. Find the closest road segment from the merged road to the centroid (once for all edges)
-        4. For each edge:
+        1. Find closest named road from property line polygon (for road/segment selection)
+        2. Calculate centroid-to-road distance (for front/rear classification)
+        3. Merge all road segments with the same name into one road
+        4. Find the closest road segment from the merged road to the property line polygon (once for all edges)
+        5. For each edge:
            a. Use the same pre-selected road segment for all edges
            b. Calculate angle between edge and road segment (-90 to 90 degrees)
            c. Calculate minimum distance (edge line to road segment)
-        5. Convert angles to absolute values (0~90 degrees):
+        6. Convert angles to absolute values (0~90 degrees):
            a. Convert all raw angles (-90~90) to absolute values (0~90)
-        6. Normalize absolute angles:
+        7. Normalize absolute angles:
            a. Find the edge with minimum absolute angle (most parallel to road, in 0~90 range)
            b. Subtract this minimum from all absolute angles (normalize so minimum becomes 0)
-        7. Classification using normalized absolute angles:
+        8. Classification using normalized absolute angles:
            - If normalized absolute angle <= configured threshold (default 30 degrees): front or rear
            - Otherwise: side edge
-        7. For front/rear edges:
-           - If min_distance < distance_from_road: front
-           - If min_distance >= distance_from_road: rear
+        9. For front/rear edges:
+           - If min_distance < centroid_distance: front
+           - If min_distance >= centroid_distance: rear
         
         Args:
             property_line: PropertyLine object to classify
@@ -81,44 +82,86 @@ class PropertyLineClassifier:
                 logger.warning("Property line has too few points for classification")
                 return property_line
             
-            # Step 1: Find closest NAMED road from centroid (skip unnamed roads)
+            # Step 1: Find closest road from property line polygon (try named first, then unnamed)
+            # This distance is used ONLY for road/segment selection
             prop_poly = Polygon(coords_clean)
             centroid = prop_poly.centroid
             centroid_point = Point(centroid.x, centroid.y)
             
-            closest_road, distance_from_road = self._find_closest_named_road(
-                centroid_point, osm_roads
+            # First try to find a named road
+            closest_road, property_line_distance = self._find_closest_named_road(
+                prop_poly, osm_roads
             )
             
+            # If no named road found, fall back to unnamed roads
             if not closest_road:
-                logger.warning("No named roads found for classification")
+                logger.info("No named roads found, trying unnamed roads for classification")
+                closest_road, property_line_distance = self._find_closest_road(
+                    prop_poly, osm_roads
+                )
+            
+            if not closest_road:
+                logger.warning("No roads found for classification")
                 return property_line
+            
+            # Calculate centroid-to-road distance for front/rear classification
+            # This is the distance used to determine if an edge is front or rear
+            road_centerline = closest_road.get("centerline", {})
+            road_coords = road_centerline.get("coordinates", [])
+            if road_coords and len(road_coords) >= 2:
+                road_line = LineString(road_coords)
+                centroid_distance_deg = centroid_point.distance(road_line)
+                # Convert to meters using centroid latitude
+                avg_lat = centroid_point.y
+                m_per_deg_lat = 111000
+                m_per_deg_lon = 111000 * abs(math.cos(math.radians(avg_lat)))
+                m_per_deg = (m_per_deg_lat + m_per_deg_lon) / 2
+                centroid_distance = centroid_distance_deg * m_per_deg
+            else:
+                centroid_distance = property_line_distance  # Fallback
             
             # Get angle threshold from config
             config = get_config()
             angle_threshold = config.uk_regulatory.classifier_parallel_angle_threshold
             
             road_name = closest_road.get('name', 'Unnamed')
+            is_named_road = road_name and road_name.lower() not in ["unnamed road", "unnamed", "road", ""]
             
             # Merge all road segments with the same name into one road
-            merged_road = self._merge_roads_by_name(road_name, osm_roads, closest_road)
+            # For unnamed roads, just use the single closest road segment
+            if is_named_road:
+                merged_road = self._merge_roads_by_name(road_name, osm_roads, closest_road)
+            else:
+                # For unnamed roads, create a merged road from just this one segment
+                merged_road = {
+                    "id": closest_road.get("id", ""),
+                    "name": "Unnamed Road",
+                    "type": closest_road.get("type", "residential"),
+                    "centerline": closest_road.get("centerline", {})
+                }
             
-            # Find the closest road segment from the merged road to the centroid (once for all edges)
-            closest_road_segment, closest_segment_idx = self._find_closest_road_segment_to_point(
-                merged_road, centroid_point
+            # Find the closest road segment from the merged road to the property line polygon (once for all edges)
+            # This uses property_line_distance for selection
+            closest_road_segment, closest_segment_idx = self._find_closest_road_segment_to_polygon(
+                merged_road, prop_poly
             )
             
             if debug:
                 logger.info(f"=== PROPERTY LINE CLASSIFICATION DEBUG ===")
                 logger.info(f"Using angle threshold: ±{angle_threshold}° (from config)")
-                logger.info(f"Closest road: {road_name}, centroid-to-road distance: {distance_from_road:.2f}m")
-                logger.info(f"Merged {len([r for r in osm_roads if r.get('name') == road_name])} segments into one road")
+                logger.info(f"Closest road: {road_name}")
+                logger.info(f"  Property-line-to-road distance (for selection): {property_line_distance:.2f}m")
+                logger.info(f"  Centroid-to-road distance (for classification): {centroid_distance:.2f}m")
+                if is_named_road:
+                    logger.info(f"Merged {len([r for r in osm_roads if r.get('name') == road_name])} segments into one road")
+                else:
+                    logger.info(f"Using unnamed road segment for classification")
                 if closest_road_segment:
                     road_coords = merged_road.get("centerline", {}).get("coordinates", [])
                     if closest_segment_idx >= 0 and closest_segment_idx < len(road_coords) - 1:
                         seg_start = road_coords[closest_segment_idx]
                         seg_end = road_coords[closest_segment_idx + 1]
-                        logger.info(f"Selected road segment {closest_segment_idx} for all edges:")
+                        logger.info(f"Selected road segment {closest_segment_idx} (closest to property line polygon):")
                         logger.info(f"  Segment start: ({seg_start[0]:.6f}, {seg_start[1]:.6f})")
                         logger.info(f"  Segment end:   ({seg_end[0]:.6f}, {seg_end[1]:.6f})")
                 logger.info(f"Property line has {len(coords_clean)} edges")
@@ -206,19 +249,20 @@ class PropertyLineClassifier:
                     logger.info(f"  Absolute angle: {abs_angle:.2f}°")
                     logger.info(f"  Normalized absolute angle: {normalized_abs_angle:.2f}° (abs - {min_abs_angle:.2f}°)")
                     logger.info(f"  Minimum distance (edge to road segment): {min_distance:.2f}m")
-                    logger.info(f"  Centroid-to-road distance: {distance_from_road:.2f}m")
+                    logger.info(f"  Centroid-to-road distance (for classification): {centroid_distance:.2f}m")
                 
                 # Classification based on normalized absolute angle (using config threshold)
                 # Since we're using absolute angles, we only check if normalized_abs_angle <= threshold
                 if normalized_abs_angle <= angle_threshold:
                     # Front or rear edge (parallel to road)
-                    if min_distance < distance_from_road:
+                    # Compare min_distance with centroid_distance (not property_line_distance)
+                    if min_distance < centroid_distance:
                         classification = "FRONT"
-                        reason = f"normalized_abs_angle={normalized_abs_angle:.2f}° (parallel, <= {angle_threshold}°) AND min_distance={min_distance:.2f}m < centroid_distance={distance_from_road:.2f}m"
+                        reason = f"normalized_abs_angle={normalized_abs_angle:.2f}° (parallel, <= {angle_threshold}°) AND min_distance={min_distance:.2f}m < centroid_distance={centroid_distance:.2f}m"
                         front_edge_indices.append(i)
                     else:
                         classification = "REAR"
-                        reason = f"normalized_abs_angle={normalized_abs_angle:.2f}° (parallel, <= {angle_threshold}°) AND min_distance={min_distance:.2f}m >= centroid_distance={distance_from_road:.2f}m"
+                        reason = f"normalized_abs_angle={normalized_abs_angle:.2f}° (parallel, <= {angle_threshold}°) AND min_distance={min_distance:.2f}m >= centroid_distance={centroid_distance:.2f}m"
                         rear_edge_indices.append(i)
                 else:
                     # Side edge (perpendicular to road)
@@ -235,7 +279,7 @@ class PropertyLineClassifier:
                     "abs_angle": abs_angle,
                     "normalized_abs_angle": normalized_abs_angle,
                     "min_distance": min_distance,
-                    "distance_from_road": distance_from_road,
+                    "centroid_distance": centroid_distance,
                     "classification": classification,
                     "reason": reason
                 })
@@ -283,7 +327,8 @@ class PropertyLineClassifier:
             
             # Store debug info in metadata
             property_line.metadata["edge_debug_info"] = edge_debug_info
-            property_line.metadata["distance_from_road"] = distance_from_road
+            property_line.metadata["centroid_distance"] = centroid_distance
+            property_line.metadata["property_line_distance"] = property_line_distance
             property_line.metadata["closest_road_name"] = merged_road.get('name', 'Unnamed')
             
             # Verify all edges are classified
@@ -303,12 +348,17 @@ class PropertyLineClassifier:
     
     def _find_closest_named_road(
         self,
-        centroid_point: Point,
+        property_polygon: Polygon,
         osm_roads: List[Dict[str, Any]]
     ) -> Tuple[Optional[Dict[str, Any]], float]:
         """
-        Find the closest NAMED road from centroid point
+        Find the closest NAMED road from property line polygon
+        Calculates minimum distance from any point on the property line polygon to the road
         Skips unnamed roads or roads without names
+        
+        Args:
+            property_polygon: Property line polygon
+            osm_roads: List of OSM road features
         
         Returns:
             Tuple of (closest_road_dict, distance_in_meters)
@@ -318,6 +368,10 @@ class PropertyLineClassifier:
         
         closest_road = None
         min_distance = float('inf')
+        
+        # Get property polygon centroid for distance conversion
+        centroid = property_polygon.centroid
+        avg_lat = centroid.y
         
         for road in osm_roads:
             # Skip unnamed roads or roads without names
@@ -337,10 +391,11 @@ class PropertyLineClassifier:
             
             try:
                 road_line = LineString(road_coords)
-                distance_deg = centroid_point.distance(road_line)
+                # Calculate distance from property polygon to road line
+                # This gives the minimum distance from any point on the polygon boundary to the road
+                distance_deg = property_polygon.distance(road_line)
                 
-                # Convert to meters using centroid latitude
-                avg_lat = centroid_point.y
+                # Convert to meters using property centroid latitude
                 m_per_deg_lat = 111000
                 m_per_deg_lon = 111000 * abs(math.cos(math.radians(avg_lat)))
                 m_per_deg = (m_per_deg_lat + m_per_deg_lon) / 2
@@ -350,7 +405,65 @@ class PropertyLineClassifier:
                     min_distance = distance_m
                     closest_road = road
             except Exception as e:
-                logger.debug(f"Error processing road {road_name}: {e}")
+                road_id = road.get("id", "unknown")
+                logger.debug(f"Error processing road {road_id}: {e}")
+                continue
+        
+        return closest_road, min_distance
+    
+    def _find_closest_road(
+        self,
+        property_polygon: Polygon,
+        osm_roads: List[Dict[str, Any]]
+    ) -> Tuple[Optional[Dict[str, Any]], float]:
+        """
+        Find the closest road from property line polygon (including unnamed roads)
+        Calculates minimum distance from any point on the property line polygon to the road
+        This is used as a fallback when no named roads are found
+        
+        Args:
+            property_polygon: Property line polygon
+            osm_roads: List of OSM road features
+        
+        Returns:
+            Tuple of (closest_road_dict, distance_in_meters)
+        """
+        if not osm_roads:
+            return None, float('inf')
+        
+        closest_road = None
+        min_distance = float('inf')
+        
+        # Get property polygon centroid for distance conversion
+        centroid = property_polygon.centroid
+        avg_lat = centroid.y
+        
+        for road in osm_roads:
+            centerline = road.get("centerline", {})
+            if not centerline:
+                continue
+            road_coords = centerline.get("coordinates", [])
+            if len(road_coords) < 2:
+                continue
+            
+            try:
+                road_line = LineString(road_coords)
+                # Calculate distance from property polygon to road line
+                # This gives the minimum distance from any point on the polygon boundary to the road
+                distance_deg = property_polygon.distance(road_line)
+                
+                # Convert to meters using property centroid latitude
+                m_per_deg_lat = 111000
+                m_per_deg_lon = 111000 * abs(math.cos(math.radians(avg_lat)))
+                m_per_deg = (m_per_deg_lat + m_per_deg_lon) / 2
+                distance_m = distance_deg * m_per_deg
+                
+                if distance_m < min_distance:
+                    min_distance = distance_m
+                    closest_road = road
+            except Exception as e:
+                road_id = road.get("id", "unknown")
+                logger.debug(f"Error processing road {road_id}: {e}")
                 continue
         
         return closest_road, min_distance
@@ -446,17 +559,18 @@ class PropertyLineClassifier:
         
         return merged_road
     
-    def _find_closest_road_segment_to_point(
+    def _find_closest_road_segment_to_polygon(
         self,
         road: Dict[str, Any],
-        point: Point
+        property_polygon: Polygon
     ) -> Tuple[Optional[LineString], int]:
         """
-        Find the closest road segment from the merged road to a point (e.g., centroid)
+        Find the closest road segment from the merged road to the property line polygon
+        Calculates minimum distance from property polygon to each road segment
         
         Args:
             road: Merged road dictionary with centerline coordinates
-            point: Point to find closest segment to (e.g., property centroid)
+            property_polygon: Property line polygon
         
         Returns:
             Tuple of (closest_road_segment_linestring, segment_index)
@@ -469,7 +583,7 @@ class PropertyLineClassifier:
         if len(road_coords) < 2:
             return None, -1
         
-        # Find closest road segment to the point
+        # Find closest road segment to the property polygon
         closest_segment = None
         min_distance_deg = float('inf')
         closest_segment_idx = -1
@@ -477,7 +591,9 @@ class PropertyLineClassifier:
         # Check each segment of the road
         for i in range(len(road_coords) - 1):
             road_segment = LineString([road_coords[i], road_coords[i + 1]])
-            distance = point.distance(road_segment)
+            # Calculate distance from property polygon to this road segment
+            # This gives the minimum distance from any point on the polygon to the segment
+            distance = property_polygon.distance(road_segment)
             
             if distance < min_distance_deg:
                 min_distance_deg = distance

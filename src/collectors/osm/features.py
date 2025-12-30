@@ -1,5 +1,5 @@
 """
-Feature parsing for water, vegetation, trees, and landuse
+Feature parsing for water, vegetation, and trees
 
 Handles parsing of non-building, non-road OSM features
 """
@@ -9,7 +9,7 @@ from .models import OSMNode, OSMWay
 
 
 class FeatureProcessor:
-    """Processes water, vegetation, trees, and landuse features"""
+    """Processes water, vegetation, and trees features"""
     
     @staticmethod
     def parse_water_features(ways: List[OSMWay]) -> List[Dict[str, Any]]:
@@ -58,27 +58,6 @@ class FeatureProcessor:
                         "osm_id": way.id
                     })
         return vegetation_zones
-    
-    @staticmethod
-    def parse_landuse(ways: List[OSMWay]) -> List[Dict[str, Any]]:
-        """Parse landuse features from ways"""
-        landuse_features = []
-        for way in ways:
-            tags = way.tags
-            if "landuse" in tags:
-                coords = way.get_coordinates()
-                if len(coords) >= 4:
-                    if coords[0] != coords[-1]:
-                        coords.append(coords[0])
-                    
-                    landuse_features.append({
-                        "id": f"landuse_{way.id}",
-                        "type": tags.get("landuse"),
-                        "geometry": {"type": "Polygon", "coordinates": [coords]},
-                        "osm_tags": tags,
-                        "osm_id": way.id
-                    })
-        return landuse_features
     
     @staticmethod
     def parse_trees(nodes: Dict[int, OSMNode]) -> List[Dict[str, Any]]:

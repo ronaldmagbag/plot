@@ -47,7 +47,6 @@ class PropertyLineProcessor:
         search_radius_m: float,
         osm_buildings: Optional[List[Dict[str, Any]]] = None,
         osm_roads: Optional[List[Dict[str, Any]]] = None,
-        osm_landuse: Optional[List[Dict[str, Any]]] = None
     ) -> Optional[PropertyLine]:
         """
         Get property line at given location
@@ -105,7 +104,7 @@ class PropertyLineProcessor:
         # Fallback to OSM-based detection
         logger.info("Using OSM-based property line detection")
         osm_data = self._get_osm_property_line(
-            lat, lon, search_radius_m, osm_buildings, osm_roads, osm_landuse
+            lat, lon, search_radius_m, osm_buildings, osm_roads  # OSM landuse removed
         )
         
         if osm_data:
@@ -119,7 +118,44 @@ class PropertyLineProcessor:
         center_lat: float
     ) -> PropertyLine:
         """Create PropertyLine object from data dict"""
-        coords = close_polygon(data["coordinates"])
+        # Extract coordinates - handle both formats:
+        # 1. GeoJSON Polygon format: [[[lon, lat], ...]]
+        # 2. Direct list format: [[lon, lat], ...] (from INSPIRE)
+        coords_raw = data.get("coordinates", [])
+        
+        if not isinstance(coords_raw, list) or len(coords_raw) == 0:
+            logger.error(f"Invalid coordinates in data: {type(coords_raw)}")
+            coords = []
+        else:
+            first_element = coords_raw[0]
+            
+            # Check if GeoJSON format: [[[lon, lat], ...]]
+            if isinstance(first_element, list):
+                if len(first_element) > 0:
+                    # Check if first_element contains coordinate pairs (nested list)
+                    first_item = first_element[0]
+                    if isinstance(first_item, list) and len(first_item) == 2:
+                        # Format [[[lon, lat], ...]] - extract the ring
+                        coords = first_element
+                    elif isinstance(first_item, (int, float)) and len(first_element) == 2:
+                        # Format [[lon, lat], ...] - first_element is a coordinate pair
+                        # This means coords_raw is already the list of coordinate pairs
+                        coords = coords_raw
+                    else:
+                        # Unknown format
+                        logger.error(f"Unknown coordinate format: first_item type: {type(first_item)}, first_element: {first_element[:2] if len(first_element) > 2 else first_element}")
+                        coords = []
+                else:
+                    # Empty list
+                    logger.error(f"First element is empty list")
+                    coords = []
+            else:
+                logger.error(f"Invalid coordinate structure: first_element type: {type(first_element)}, value: {first_element}")
+                coords = []
+        
+        # Close polygon if needed
+        coords = close_polygon(coords)
+        
         area = data.get("area_sqm", calculate_polygon_area(coords, center_lat))
         perimeter = data.get("perimeter_m", calculate_perimeter(coords, center_lat))
         
@@ -274,15 +310,45 @@ class PropertyLineProcessor:
         search_radius_m: float,
         osm_buildings: Optional[List[Dict[str, Any]]],
         osm_roads: Optional[List[Dict[str, Any]]],
-        osm_landuse: Optional[List[Dict[str, Any]]]
     ) -> Optional[Dict[str, Any]]:
         """
         Get property line from OSM data (fallback when INSPIRE not available or too large)
         
-        This uses the existing OSM-based boundary detection logic
-        Returns None to let the main collector handle OSM fallback
+        Uses multiple strategies:
+        1. Derive from roads
+        2. Derive from neighbor buildings
+        3. Estimate from building footprint (existing structures)
         """
-        # Return None - the main collector will handle OSM fallback
-        # This allows the collector to use its comprehensive OSM detection strategies
+        # Use lazy import to avoid circular dependency
+        # Import here instead of at module level
+        from .collector import BoundaryCollector
+        
+        # Create a temporary collector instance to use its methods
+        # BoundaryCollector.__init__ takes optional inspire_gml_path, so we can pass None
+        temp_collector = BoundaryCollector()
+        
+        # Strategy 1: Derive from roads
+        if osm_roads:
+            road_boundary = temp_collector._derive_from_roads(lat, lon, osm_roads, search_radius_m)
+            if road_boundary:
+                logger.info("Property line derived from road network")
+                return road_boundary
+        
+        # Strategy 2: Derive from neighbor buildings
+        if osm_buildings:
+            neighbor_boundary = temp_collector._derive_from_neighbor_buildings(lat, lon, osm_buildings, search_radius_m)
+            if neighbor_boundary:
+                logger.info("Property line derived from neighbor buildings")
+                return neighbor_boundary
+        
+        # Strategy 3: Estimate from building footprint (existing structures)
+        if osm_buildings:
+            building_boundary = temp_collector._estimate_from_building(lat, lon, search_radius_m, osm_buildings)
+            if building_boundary:
+                logger.info("Property line estimated from building footprint")
+                return building_boundary
+        
+        # No OSM-based boundary found
+        logger.info("No OSM-based property line found using roads, neighbor buildings, or building footprints")
         return None
 
