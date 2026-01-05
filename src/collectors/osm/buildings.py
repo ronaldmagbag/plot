@@ -23,8 +23,10 @@ from .models import OSMWay
 class BuildingProcessor:
     """Processes and classifies buildings from OSM data"""
     
-    def __init__(self):
+    def __init__(self, terrain_collector: Optional[Any] = None, dsm_collector: Optional[Any] = None):
         self.config = get_config()
+        self.terrain_collector = terrain_collector  # Optional terrain collector for DTM (ground elevation)
+        self.dsm_collector = dsm_collector  # Optional DSM collector for surface elevation (includes buildings)
     
     def parse_buildings(self, ways: List[OSMWay]) -> List[Dict[str, Any]]:
         """
@@ -58,17 +60,27 @@ class BuildingProcessor:
                     if way.nodes:
                         node_set = {n.id for n in way.nodes}
                     
+                    # Estimate height with terrain data if available
+                    height_m = self._estimate_height(
+                        tags, 
+                        building_coords=coords, 
+                        terrain_collector=self.terrain_collector,
+                        building_osm_id=way.id
+                    )
+                    
                     building_ways.append({
                         "id": f"building_{way.id}",
                         "osm_id": way.id,
                         "coords": coords,
                         "tags": tags,
                         "nodes": node_set,  # Store node IDs for merging
-                        "height_m": self._estimate_height(tags),
+                        "height_m": height_m,
                         "stories": self._estimate_stories(tags),
                         "building_type": self._classify_building_type(tags),
                         "usage": self._get_building_usage(tags)
                     })
+                    
+                    logger.info(f"Building OSM-{way.id}: Final height = {height_m:.1f}m, type = {self._classify_building_type(tags)}, stories = {self._estimate_stories(tags)}")
         
         return building_ways
     
@@ -235,27 +247,61 @@ class BuildingProcessor:
             "osm_id": building["osm_id"]
         }
     
-    def _estimate_height(self, tags: Dict[str, str]) -> float:
-        """Estimate building height from OSM tags"""
-        # Direct height tag
+    def _estimate_height(
+        self, 
+        tags: Dict[str, str],
+        building_coords: Optional[List[List[float]]] = None,
+        terrain_collector: Optional[Any] = None,
+        building_osm_id: Optional[int] = None
+    ) -> float:
+        """
+        Estimate building height from OSM tags
+        
+        Priority:
+        1. Direct height tag from OSM
+        2. Building levels calculation
+        3. Building type defaults
+        
+        Note: DSM-DTM calculation is disabled for performance reasons
+        (DSM fetching takes 30+ seconds per building)
+        """
+        building_id = f"OSM-{building_osm_id}" if building_osm_id else tags.get("id", "unknown")
+        building_type = tags.get("building", "yes")
+        
+        logger.info(f"Building {building_id}: Estimating height (type: '{building_type}')")
+        
+        # 1. Direct height tag (highest priority)
         if "height" in tags:
             try:
                 height_str = tags["height"].replace("m", "").replace(" ", "")
-                return float(height_str)
+                height = float(height_str)
+                logger.info(f"Building {building_id}: ✓ Using direct height tag '{tags['height']}' = {height:.1f}m")
+                return height
             except ValueError:
-                pass
+                logger.warning(f"Building {building_id}: ✗ Failed to parse height tag '{tags.get('height')}'")
         
-        # Estimate from levels
+        # 2. Estimate from levels
         if "building:levels" in tags:
             try:
                 levels = int(tags["building:levels"])
-                return levels * 3.0  # 3m per level
+                height = levels * 3.0  # 3m per level
+                logger.info(f"Building {building_id}: ✓ Calculated from {levels} levels = {height:.1f}m (3m per level)")
+                return height
             except ValueError:
-                pass
+                logger.warning(f"Building {building_id}: ✗ Failed to parse building:levels '{tags.get('building:levels')}'")
         
-        # Use building type defaults
-        building_type = tags.get("building", "yes")
-        return self.config.building_heights.get(building_type, 8.0)
+        # 3. DSM-DTM calculation disabled for performance
+        # Note: DSM fetching takes too long (30+ seconds per building)
+        # Skipping DSM/DTM-based height calculation for now
+        # if building_coords and len(building_coords) > 0:
+        #     # DSM-DTM calculation code disabled
+        pass
+        
+        # 4. Use building type defaults
+        default_height = self.config.building_heights.get(building_type, 8.0)
+        logger.info(f"Building {building_id}: → Using default height for type '{building_type}' = {default_height:.1f}m")
+        logger.info(f"Building {building_id}: Height estimation complete: {default_height:.1f}m")
+        return default_height
     
     def _estimate_stories(self, tags: Dict[str, str]) -> int:
         """Estimate number of stories from OSM tags"""

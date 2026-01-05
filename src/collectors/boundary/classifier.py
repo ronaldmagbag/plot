@@ -98,7 +98,7 @@ class PropertyLineClassifier:
                 logger.info("No named roads found, trying unnamed roads for classification")
                 closest_road, property_line_distance = self._find_closest_road(
                     prop_poly, osm_roads
-                )
+            )
             
             if not closest_road:
                 logger.warning("No roads found for classification")

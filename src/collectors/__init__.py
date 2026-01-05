@@ -14,6 +14,7 @@ from .elevation_collector import ElevationCollector
 from .soil_collector import SoilCollector
 from .boundary import BoundaryCollector
 from .terrain_collector import TerrainCollector
+from .dsm_collector import DSMCollector
 from .vegetation_collector import VegetationCollector
 from .mapbox_imagery_collector import MapboxImageryCollector
 
@@ -23,6 +24,7 @@ __all__ = [
     "SoilCollector",
     "BoundaryCollector",
     "TerrainCollector",
+    "DSMCollector",
     "VegetationCollector",
     "MapboxImageryCollector",
 ]

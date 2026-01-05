@@ -333,6 +333,54 @@ class TerrainCollector:
         else:
             return "very_steep"
     
+    def get_elevation_at_point(self, lat: float, lon: float) -> Optional[float]:
+        """
+        Get elevation at a specific point using Mapbox Terrain-RGB
+        
+        Returns:
+            Elevation in meters, or None if unavailable
+        """
+        if not self.mapbox_token or not HAS_PIL or not HAS_MERCANTILE:
+            return None
+        
+        try:
+            zoom = 14
+            tile = mercantile.tile(lon, lat, zoom)
+            
+            url = self.MAPBOX_TERRAIN_URL.format(
+                z=zoom, x=tile.x, y=tile.y, token=self.mapbox_token
+            )
+            
+            response = requests.get(url, timeout=30)
+            response.raise_for_status()
+            
+            # Parse RGB to elevation
+            img = Image.open(BytesIO(response.content))
+            img_array = np.array(img)
+            
+            # Decode Terrain-RGB: height = -10000 + ((R * 256 * 256 + G * 256 + B) * 0.1)
+            R = img_array[:, :, 0].astype(float)
+            G = img_array[:, :, 1].astype(float)
+            B = img_array[:, :, 2].astype(float)
+            elevation_grid = -10000 + ((R * 256 * 256 + G * 256 + B) * 0.1)
+            
+            # Get pixel position
+            bounds = mercantile.bounds(tile)
+            px_x = int((lon - bounds.west) / (bounds.east - bounds.west) * 256)
+            px_y = int((bounds.north - lat) / (bounds.north - bounds.south) * 256)
+            
+            # Clamp to valid range
+            px_x = max(0, min(255, px_x))
+            px_y = max(0, min(255, px_y))
+            
+            elevation = float(elevation_grid[px_y, px_x])
+            logger.debug(f"Elevation at ({lat:.6f}, {lon:.6f}) = {elevation:.1f}m from Mapbox Terrain-RGB")
+            return elevation
+            
+        except Exception as e:
+            logger.debug(f"Failed to get elevation at point ({lat:.6f}, {lon:.6f}): {e}")
+            return None
+    
     def _get_default_terrain(self, lat: float, lon: float) -> TerrainData:
         """Return default terrain when all sources fail"""
         return TerrainData(

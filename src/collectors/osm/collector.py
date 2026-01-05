@@ -31,10 +31,23 @@ class OSMCollector:
         self.api_client = OverpassAPIClient()
         self.cache = OSMCache(cache_dir)
         self.parser = OSMResponseParser()
-        self.building_processor = BuildingProcessor()
+        self.terrain_collector = None  # Will be set if terrain collector is available
+        self.dsm_collector = None  # Will be set if DSM collector is available
+        self.building_processor = BuildingProcessor(terrain_collector=None, dsm_collector=None)  # Will be updated if available
         self.road_processor = RoadProcessor()
         self.feature_processor = FeatureProcessor()
         self.timeout = self.config.api.overpass_timeout
+    
+    def set_terrain_collector(self, terrain_collector):
+        """Set terrain collector for building height calculation"""
+        self.terrain_collector = terrain_collector
+        self.building_processor.terrain_collector = terrain_collector
+    
+    def set_dsm_collector(self, dsm_collector):
+        """Set DSM collector for real building height calculation"""
+        self.dsm_collector = dsm_collector
+        if self.building_processor:
+            self.building_processor.dsm_collector = dsm_collector
     
     def fetch_all_features(
         self,

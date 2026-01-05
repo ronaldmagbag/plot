@@ -46,7 +46,7 @@ from .models import (
 
 from .collectors import (
     OSMCollector, ElevationCollector, SoilCollector, BoundaryCollector,
-    TerrainCollector, VegetationCollector, MapboxImageryCollector
+    TerrainCollector, DSMCollector, VegetationCollector, MapboxImageryCollector
 )
 from .collectors.boundary.utils import calculate_polygon_area
 from .analysis import ShadowAnalyzer, AdjacencyAnalyzer, SetbackCalculator, GeometryUtils
@@ -72,10 +72,15 @@ class PlotAnalysisPipeline:
         self.osm_collector = OSMCollector(cache_dir=cache_dir)
         self.elevation_collector = ElevationCollector()
         self.terrain_collector = TerrainCollector()
+        self.dsm_collector = DSMCollector()
         self.vegetation_collector = VegetationCollector()
         self.soil_collector = SoilCollector()
         self.boundary_collector = BoundaryCollector()
         self.mapbox_imagery_collector = MapboxImageryCollector(cache_dir=cache_dir)
+        
+        # Connect terrain and DSM collectors to OSM collector for building height calculation
+        self.osm_collector.set_terrain_collector(self.terrain_collector)
+        self.osm_collector.set_dsm_collector(self.dsm_collector)
         
         # Initialize analyzers (Layers 3-8: Processing & Analysis)
         self.shadow_analyzer = ShadowAnalyzer()
@@ -160,8 +165,8 @@ class PlotAnalysisPipeline:
             osm_buildings=osm_buildings_preview,
             osm_roads=osm_roads_preview,
             classify=False  # Don't classify yet, will do it later with full data
-        )
-        
+            )
+            
         if property_line_obj_stage1:
             # Convert to old format for compatibility
             boundary_data = {
