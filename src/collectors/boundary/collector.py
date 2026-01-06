@@ -28,7 +28,8 @@ from .utils import (
     calculate_perimeter,
     close_polygon,
     point_roughly_in_polygon,
-    haversine_distance
+    haversine_distance,
+    simplify_property_line
 )
 from ...config import get_config
 
@@ -106,6 +107,72 @@ class BoundaryCollector:
         if classify and osm_roads and osm_buildings:
             property_line = self.classifier.classify(
                 property_line, osm_roads, osm_buildings
+            )
+        
+        return property_line
+    
+    def simplify_property_line(self, property_line: PropertyLine) -> PropertyLine:
+        """
+        Simplify property line using angle-first, then distance algorithm
+        
+        Args:
+            property_line: PropertyLine object to simplify
+            
+        Returns:
+            Simplified PropertyLine object
+        """
+        import math
+        
+        if not property_line.coordinates or len(property_line.coordinates) < 3:
+            return property_line
+        
+        # Get thresholds from config
+        angle_threshold = self.config.uk_regulatory.property_line_simplify_angle_threshold
+        distance_threshold_m = self.config.uk_regulatory.property_line_simplify_distance_threshold
+        
+        # Convert distance threshold from meters to degrees for lat/lon coordinates
+        # Average latitude for conversion
+        avg_lat = sum(c[1] for c in property_line.coordinates) / len(property_line.coordinates) if property_line.coordinates else 51.0
+        m_per_deg_lat = 111000.0
+        m_per_deg_lon = 111000.0 * math.cos(math.radians(avg_lat))
+        # Use average of lat and lon conversion factors for a balanced threshold
+        avg_m_per_deg = (m_per_deg_lat + m_per_deg_lon) / 2.0
+        distance_threshold_deg = distance_threshold_m / avg_m_per_deg
+        
+        logger.info(f"Simplifying property line (angle_threshold={angle_threshold}°, distance_threshold={distance_threshold_m}m = {distance_threshold_deg:.8f}°)")
+        logger.info(f"Before simplification: {len(property_line.coordinates)} points")
+        
+        # Simplify
+        simplified_coords = simplify_property_line(
+            property_line.coordinates, 
+            angle_threshold, 
+            distance_threshold_deg, 
+            avg_lat
+        )
+        
+        logger.info(f"Simplification returned: {len(simplified_coords)} points")
+        
+        # Ensure simplified polygon is still valid and closed
+        if len(simplified_coords) >= 3:
+            # Ensure simplified polygon is closed
+            if simplified_coords[0] != simplified_coords[-1]:
+                simplified_coords.append(simplified_coords[0])
+            
+            # Recalculate area and perimeter for simplified coordinates
+            area = calculate_polygon_area(simplified_coords, avg_lat)
+            perimeter = calculate_perimeter(simplified_coords, avg_lat)
+            
+            logger.info(f"Property line simplified: {len(property_line.coordinates)} → {len(simplified_coords)} points")
+            
+            # Create new PropertyLine with simplified coordinates
+            return PropertyLine(
+                coordinates=simplified_coords,
+                area_sqm=area,
+                perimeter_m=perimeter,
+                source=property_line.source + "_simplified",
+                accuracy_m=property_line.accuracy_m,
+                inspire_id=property_line.inspire_id,
+                metadata=property_line.metadata
             )
         
         return property_line

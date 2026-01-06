@@ -901,7 +901,10 @@ class PropertyLineClassifier:
             logger.warning("Invalid road centerline for 5-point rectangle classification")
             return None
         
-        from shapely.geometry import LineString
+        if not SHAPELY_AVAILABLE:
+            logger.warning("Shapely not available for 5-point rectangle classification")
+            return None
+        
         road_line = LineString(road_coords)
         
         # Calculate distance from each short edge to road

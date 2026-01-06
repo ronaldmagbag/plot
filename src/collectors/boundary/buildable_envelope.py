@@ -19,7 +19,7 @@ except ImportError:
     logger.warning("Shapely/pyproj not available - buildable envelope calculation will be limited")
 
 from .models import BuildableEnvelope, PropertyLine, SetbackLine
-from .utils import calculate_polygon_area, calculate_perimeter, close_polygon
+from .utils import calculate_polygon_area, calculate_perimeter, close_polygon, calculate_line_length
 from ...config import get_config
 
 
@@ -87,10 +87,6 @@ class BuildableEnvelopeProcessor:
         
         if len(prop_coords_clean) == 4:
             # Check if it's a rectangle (2 long edges, 2 short edges)
-            from .utils import calculate_line_length
-            from ...config import get_config
-            import math
-            
             config = get_config()
             ratio_threshold = config.uk_regulatory.classifier_5point_rectangle_ratio
             
@@ -112,8 +108,6 @@ class BuildableEnvelopeProcessor:
             if ratio >= ratio_threshold:
                 # It's a rectangle - use setback line directly as buildable envelope
                 logger.info(f"Property is rectangle (ratio={ratio:.2f}x >= {ratio_threshold}x) - using setback line as buildable envelope")
-                from .models import BuildableEnvelope
-                from .utils import calculate_perimeter
                 
                 # Calculate perimeter from setback coordinates
                 avg_lat = sum(c[1] for c in setback_coords) / len(setback_coords) if setback_coords else 0

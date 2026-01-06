@@ -48,7 +48,7 @@ from .collectors import (
     OSMCollector, ElevationCollector, SoilCollector, BoundaryCollector,
     TerrainCollector, DSMCollector, VegetationCollector, MapboxImageryCollector
 )
-from .collectors.boundary.utils import calculate_polygon_area, simplify_property_line
+from .collectors.boundary.utils import calculate_polygon_area
 from .analysis import ShadowAnalyzer, AdjacencyAnalyzer, SetbackCalculator, GeometryUtils
 
 
@@ -288,38 +288,6 @@ class PlotAnalysisPipeline:
         import copy
         property_coords_original = copy.deepcopy(property_coords) if property_coords else []
         
-        # Simplify property line using angle-first, then distance algorithm
-        if property_coords and len(property_coords) >= 3:
-            angle_threshold = self.config.uk_regulatory.property_line_simplify_angle_threshold
-            distance_threshold_m = self.config.uk_regulatory.property_line_simplify_distance_threshold
-            
-            # Convert distance threshold from meters to degrees for lat/lon coordinates
-            # Average latitude for conversion (use first coordinate's lat as approximation)
-            avg_lat = property_coords[0][1] if property_coords else 51.0
-            m_per_deg_lat = 111000.0
-            m_per_deg_lon = 111000.0 * math.cos(math.radians(avg_lat))
-            # For lat/lon, we need to account for both lat and lon scaling
-            # Use the average of lat and lon conversion factors for a balanced threshold
-            # This ensures we catch points that are close in either direction
-            avg_m_per_deg = (m_per_deg_lat + m_per_deg_lon) / 2.0
-            distance_threshold_deg = distance_threshold_m / avg_m_per_deg
-            
-            logger.info(f"Simplifying property line (angle_threshold={angle_threshold}°, distance_threshold={distance_threshold_m}m = {distance_threshold_deg:.8f}°)")
-            logger.info(f"Before simplification: {len(property_coords)} points")
-            property_coords_simplified = simplify_property_line(property_coords, angle_threshold, distance_threshold_deg, avg_lat)
-            logger.info(f"Simplification returned: {len(property_coords_simplified)} points")
-            
-            # Ensure simplified polygon is still valid and closed
-            if len(property_coords_simplified) >= 3:
-                # Ensure simplified polygon is closed
-                if property_coords_simplified[0] != property_coords_simplified[-1]:
-                    property_coords_simplified.append(property_coords_simplified[0])
-                property_coords = property_coords_simplified
-                logger.info(f"Property line simplified: {len(property_coords_original)} → {len(property_coords)} points")
-            else:
-                logger.warning(f"Simplified property line has too few points ({len(property_coords_simplified)}), using original")
-                property_coords = property_coords_original
-        
         property_area = boundary_data.get("area_sqm", 300)
         property_perimeter = boundary_data.get("perimeter_m", 70)
         
@@ -493,27 +461,34 @@ class PlotAnalysisPipeline:
         
         logger.info(f"Separated {len(existing_buildings)} existing + {len(neighbor_buildings)} neighbor buildings")
         
-        # Preliminary adjacency for setback calculation (using simplified coordinates)
-        preliminary_adjacency = self._quick_adjacency(property_coords, osm_roads)
-        
-        # Create PropertyLine object from SIMPLIFIED coordinates for classification
-        # All downstream operations (classifier, setback, buildable) use simplified coordinates
+        # Create PropertyLine object from original coordinates
+        # Simplification will be handled by boundary collector
         from .collectors.boundary.models import PropertyLine as BoundaryPropertyLine
         # PropertyLine.coordinates expects List[List[float]] = [[lon, lat], ...] (NOT GeoJSON Polygon format)
         # property_coords is already [[lon, lat], ...], so use it directly
-        logger.info(f"Creating PropertyLine object with {len(property_coords)} coordinates for classification")
-        simplified_property_line_obj = BoundaryPropertyLine(
+        logger.info(f"Creating PropertyLine object with {len(property_coords)} coordinates")
+        property_line_obj_original = BoundaryPropertyLine(
             coordinates=property_coords,  # List[List[float]] = [[lon, lat], ...]
             area_sqm=property_area,
             perimeter_m=property_perimeter,
-            source=boundary_data.get("source", "estimated") + "_simplified",
+            source=boundary_data.get("source", "estimated"),
             accuracy_m=boundary_data.get("accuracy_m", 5.0)
         )
+        
+        # Simplify property line using boundary collector (handles simplification internally)
+        logger.info("Simplifying property line using boundary collector...")
+        property_line_obj = self.boundary_collector.simplify_property_line(property_line_obj_original)
+        
+        # Update property_coords to use simplified coordinates
+        property_coords = property_line_obj.coordinates
+        
+        # Preliminary adjacency for setback calculation (using simplified coordinates)
+        preliminary_adjacency = self._quick_adjacency(property_coords, osm_roads)
         
         # Classify simplified property line with full OSM data
         logger.info(f"Classifying simplified property line with full OSM data... (coordinates: {len(property_coords)} points)")
         property_line_obj = self.boundary_collector.classifier.classify(
-            simplified_property_line_obj,
+            property_line_obj,
             osm_roads,
             osm_buildings,
             debug=False

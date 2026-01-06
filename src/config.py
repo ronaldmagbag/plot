@@ -45,7 +45,7 @@ class UKRegulatory:
     # Angle threshold: remove points where angle is close to 180° (collinear)
     property_line_simplify_angle_threshold: float = 170.0  # degrees (178° = good default)
     # Distance threshold: remove points within this distance from line (meters)
-    property_line_simplify_distance_threshold: float = 0.5  # meters (0.2m = 20cm for UK INSPIRE)
+    property_line_simplify_distance_threshold: float = 0.8  # meters (0.2m = 20cm for UK INSPIRE)
     
     # 5-point rectangle classification threshold
     # Ratio of long edges to short edges for rectangle classification
