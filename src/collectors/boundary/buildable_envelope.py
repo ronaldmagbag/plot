@@ -47,7 +47,8 @@ class BuildableEnvelopeProcessor:
         """
         Calculate buildable envelope from setback line
         
-        Finds the maximum area rectangle inscribed in the setback polygon
+        Finds the maximum area rectangle inscribed in the setback polygon.
+        For rectangle property lines (4 edges), uses setback line directly.
         
         Args:
             property_line: PropertyLine object
@@ -63,6 +64,7 @@ class BuildableEnvelopeProcessor:
         # Get setback polygon
         if setback_line:
             setback_coords = setback_line.coordinates
+            setback_area = setback_line.area_sqm
         else:
             # Calculate setback line first
             from .setback_line import SetbackLineProcessor
@@ -72,10 +74,61 @@ class BuildableEnvelopeProcessor:
                 logger.warning("Failed to calculate setback line")
                 return None
             setback_coords = setback.coordinates
+            setback_area = setback.area_sqm
         
         if not setback_coords or len(setback_coords) < 4:
             logger.warning("Invalid setback coordinates")
             return None
+        
+        # Check if property line is a rectangle (4 edges after cleaning)
+        # For rectangles, buildable area = setback area (no need to find inscribed rectangle)
+        prop_coords = property_line.coordinates
+        prop_coords_clean = prop_coords[:-1] if (prop_coords and len(prop_coords) > 1 and prop_coords[0] == prop_coords[-1]) else prop_coords
+        
+        if len(prop_coords_clean) == 4:
+            # Check if it's a rectangle (2 long edges, 2 short edges)
+            from .utils import calculate_line_length
+            from ...config import get_config
+            import math
+            
+            config = get_config()
+            ratio_threshold = config.uk_regulatory.classifier_5point_rectangle_ratio
+            
+            # Calculate edge lengths
+            edge_lengths = []
+            for i in range(len(prop_coords_clean)):
+                j = (i + 1) % len(prop_coords_clean)
+                edge_start = prop_coords_clean[i]
+                edge_end = prop_coords_clean[j]
+                length = calculate_line_length([edge_start, edge_end])
+                edge_lengths.append(length)
+            
+            # Sort by length
+            sorted_lengths = sorted(edge_lengths, reverse=True)
+            avg_long = (sorted_lengths[0] + sorted_lengths[1]) / 2
+            avg_short = (sorted_lengths[2] + sorted_lengths[3]) / 2
+            ratio = avg_long / avg_short if avg_short > 0 else 0
+            
+            if ratio >= ratio_threshold:
+                # It's a rectangle - use setback line directly as buildable envelope
+                logger.info(f"Property is rectangle (ratio={ratio:.2f}x >= {ratio_threshold}x) - using setback line as buildable envelope")
+                from .models import BuildableEnvelope
+                from .utils import calculate_perimeter
+                
+                # Calculate perimeter from setback coordinates
+                avg_lat = sum(c[1] for c in setback_coords) / len(setback_coords) if setback_coords else 0
+                perimeter_m = calculate_perimeter(setback_coords, avg_lat)
+                
+                return BuildableEnvelope(
+                    coordinates=setback_coords,
+                    area_sqm=setback_area,
+                    perimeter_m=perimeter_m,
+                    metadata={
+                        "derived_from": "setback_line",
+                        "type": "rectangle_direct",
+                        "constraints_applied": []
+                    }
+                )
         
         logger.info("=== BUILDABLE ENVELOPE CALCULATION DEBUG ===")
         logger.info(f"Setback coordinates: {len(setback_coords)} points")

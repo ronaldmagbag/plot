@@ -181,8 +181,12 @@ class ShadowAnalyzer:
         ref_lon, ref_lat = plot_boundary[0]
         local_boundary = GeometryUtils.degrees_to_local(plot_boundary, ref_lon, ref_lat)
         
-        # Get plot edges
-        edges = GeometryUtils.get_polygon_edges(local_boundary)
+        # Calculate polygon center in local coordinates
+        center_deg = GeometryUtils.polygon_centroid(plot_boundary)
+        center_local = GeometryUtils.degrees_to_local([list(center_deg)], ref_lon, ref_lat)[0]
+        
+        # Get plot edges (direction determined relative to polygon center)
+        edges = GeometryUtils.get_polygon_edges(local_boundary, center=center_local)
         
         # Classify edges by cardinal direction
         facade_edges = {"north": [], "south": [], "east": [], "west": []}

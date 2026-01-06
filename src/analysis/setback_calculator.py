@@ -293,8 +293,12 @@ class SetbackCalculator:
         if local_boundary[0] != local_boundary[-1]:
             local_boundary = list(local_boundary) + [local_boundary[0]]
         
-        # Get edges with their adjacency information
-        edges = GeometryUtils.get_polygon_edges(local_boundary)
+        # Calculate polygon center in local coordinates
+        center = GeometryUtils.polygon_centroid([[c[0], c[1]] for c in local_boundary])
+        center_local = (center[0], center[1])
+        
+        # Get edges with their adjacency information (direction determined relative to polygon center)
+        edges = GeometryUtils.get_polygon_edges(local_boundary, center=center_local)
         
         # Create a mapping of edge index to setback distance
         edge_setbacks = []

@@ -48,7 +48,7 @@ from .collectors import (
     OSMCollector, ElevationCollector, SoilCollector, BoundaryCollector,
     TerrainCollector, DSMCollector, VegetationCollector, MapboxImageryCollector
 )
-from .collectors.boundary.utils import calculate_polygon_area
+from .collectors.boundary.utils import calculate_polygon_area, simplify_property_line
 from .analysis import ShadowAnalyzer, AdjacencyAnalyzer, SetbackCalculator, GeometryUtils
 
 
@@ -165,8 +165,8 @@ class PlotAnalysisPipeline:
             osm_buildings=osm_buildings_preview,
             osm_roads=osm_roads_preview,
             classify=False  # Don't classify yet, will do it later with full data
-            )
-            
+        )
+        
         if property_line_obj_stage1:
             # Convert to old format for compatibility
             boundary_data = {
@@ -282,6 +282,43 @@ class PlotAnalysisPipeline:
                     property_coords = []
             else:
                 property_coords = []
+        
+        # Store original property coordinates before simplification
+        # Use deep copy to ensure original is preserved
+        import copy
+        property_coords_original = copy.deepcopy(property_coords) if property_coords else []
+        
+        # Simplify property line using angle-first, then distance algorithm
+        if property_coords and len(property_coords) >= 3:
+            angle_threshold = self.config.uk_regulatory.property_line_simplify_angle_threshold
+            distance_threshold_m = self.config.uk_regulatory.property_line_simplify_distance_threshold
+            
+            # Convert distance threshold from meters to degrees for lat/lon coordinates
+            # Average latitude for conversion (use first coordinate's lat as approximation)
+            avg_lat = property_coords[0][1] if property_coords else 51.0
+            m_per_deg_lat = 111000.0
+            m_per_deg_lon = 111000.0 * math.cos(math.radians(avg_lat))
+            # For lat/lon, we need to account for both lat and lon scaling
+            # Use the average of lat and lon conversion factors for a balanced threshold
+            # This ensures we catch points that are close in either direction
+            avg_m_per_deg = (m_per_deg_lat + m_per_deg_lon) / 2.0
+            distance_threshold_deg = distance_threshold_m / avg_m_per_deg
+            
+            logger.info(f"Simplifying property line (angle_threshold={angle_threshold}°, distance_threshold={distance_threshold_m}m = {distance_threshold_deg:.8f}°)")
+            logger.info(f"Before simplification: {len(property_coords)} points")
+            property_coords_simplified = simplify_property_line(property_coords, angle_threshold, distance_threshold_deg, avg_lat)
+            logger.info(f"Simplification returned: {len(property_coords_simplified)} points")
+            
+            # Ensure simplified polygon is still valid and closed
+            if len(property_coords_simplified) >= 3:
+                # Ensure simplified polygon is closed
+                if property_coords_simplified[0] != property_coords_simplified[-1]:
+                    property_coords_simplified.append(property_coords_simplified[0])
+                property_coords = property_coords_simplified
+                logger.info(f"Property line simplified: {len(property_coords_original)} → {len(property_coords)} points")
+            else:
+                logger.warning(f"Simplified property line has too few points ({len(property_coords_simplified)}), using original")
+                property_coords = property_coords_original
         
         property_area = boundary_data.get("area_sqm", 300)
         property_perimeter = boundary_data.get("perimeter_m", 70)
@@ -456,27 +493,31 @@ class PlotAnalysisPipeline:
         
         logger.info(f"Separated {len(existing_buildings)} existing + {len(neighbor_buildings)} neighbor buildings")
         
-        # Preliminary adjacency for setback calculation
+        # Preliminary adjacency for setback calculation (using simplified coordinates)
         preliminary_adjacency = self._quick_adjacency(property_coords, osm_roads)
         
-        # Get property line with classification - reuse from STAGE 1 if available
-        if property_line_obj_stage1:
-            # Reuse property line from STAGE 1, but classify it now with full OSM data
-            logger.info("Reusing property line from STAGE 1, classifying with full OSM data...")
-            property_line_obj = self.boundary_collector.classifier.classify(
-                property_line_obj_stage1,
-                osm_roads,
-                osm_buildings,
-                debug=False
-            )
-        else:
-            # Get property line with classification using new boundary collector
-            property_line_obj = self.boundary_collector.get_property_line(
-                lat, lon, radius,
-                osm_buildings=osm_buildings,
-                osm_roads=osm_roads,
-                classify=True
-            )
+        # Create PropertyLine object from SIMPLIFIED coordinates for classification
+        # All downstream operations (classifier, setback, buildable) use simplified coordinates
+        from .collectors.boundary.models import PropertyLine as BoundaryPropertyLine
+        # PropertyLine.coordinates expects List[List[float]] = [[lon, lat], ...] (NOT GeoJSON Polygon format)
+        # property_coords is already [[lon, lat], ...], so use it directly
+        logger.info(f"Creating PropertyLine object with {len(property_coords)} coordinates for classification")
+        simplified_property_line_obj = BoundaryPropertyLine(
+            coordinates=property_coords,  # List[List[float]] = [[lon, lat], ...]
+            area_sqm=property_area,
+            perimeter_m=property_perimeter,
+            source=boundary_data.get("source", "estimated") + "_simplified",
+            accuracy_m=boundary_data.get("accuracy_m", 5.0)
+        )
+        
+        # Classify simplified property line with full OSM data
+        logger.info(f"Classifying simplified property line with full OSM data... (coordinates: {len(property_coords)} points)")
+        property_line_obj = self.boundary_collector.classifier.classify(
+            simplified_property_line_obj,
+            osm_roads,
+            osm_buildings,
+            debug=False
+        )
         
         # If we got a property line object, use it; otherwise fall back to old method
         if property_line_obj:
@@ -552,7 +593,8 @@ class PlotAnalysisPipeline:
         boundaries = self._build_boundaries(
             property_coords, property_area, property_perimeter,
             setback_result, buildable_result, boundary_data,
-            property_line_obj  # Pass property line object for segments
+            property_line_obj,  # Pass property line object for segments
+            property_coords_original  # Pass original coordinates for property_line_simplify
         )
         
         # Surrounding context (use filtered neighbor_buildings, not all osm_buildings)
@@ -790,16 +832,34 @@ class PlotAnalysisPipeline:
         setback_result: Dict[str, Any],
         buildable_result: Dict[str, Any],
         boundary_data: Dict[str, Any],
-        property_line_obj: Optional[Any] = None
+        property_line_obj: Optional[Any] = None,
+        property_coords_original: Optional[List[List[float]]] = None
     ) -> Boundaries:
-        """Build Boundaries model from collected data"""
+        """Build Boundaries model from collected data
         
-        # Property line - include segments if available
+        Note: property_coords is the SIMPLIFIED version (used for all downstream operations)
+        property_coords_original is the ORIGINAL version (stored as property_line)
+        """
+        
+        # Property line (ORIGINAL) - store original coordinates
+        property_line_original_coords = property_coords_original if property_coords_original else property_coords
         property_line = PropertyLine(
-            coordinates=[property_coords],
+            coordinates=[property_line_original_coords],
             area_sqm=round(property_area, 1),
             perimeter_m=round(property_perimeter, 1),
             source=boundary_data.get("source", "estimated"),
+            source_date=datetime.utcnow().isoformat(),
+            accuracy_m=boundary_data.get("accuracy_m", 5.0)
+        )
+        
+        # Property line (SIMPLIFIED) - property_coords is already simplified
+        # Log to verify simplification is working
+        logger.info(f"Creating property_line_simplify: {len(property_coords)} points (original had {len(property_line_original_coords)} points)")
+        property_line_simplify = PropertyLine(
+            coordinates=[property_coords],
+            area_sqm=round(property_area, 1),  # Area should be similar
+            perimeter_m=round(property_perimeter, 1),  # Perimeter may be slightly different
+            source=boundary_data.get("source", "estimated") + "_simplified",
             source_date=datetime.utcnow().isoformat(),
             accuracy_m=boundary_data.get("accuracy_m", 5.0)
         )
@@ -836,11 +896,18 @@ class PlotAnalysisPipeline:
                     "color": property_line_obj.right_side.color
                 }
         
-        # Update property_line with segments (using model_dump and update)
+        # Update property_line (original) with segments if available
         if segments_data:
             property_line_dict = property_line.model_dump()
             property_line_dict["segments"] = segments_data
             property_line = PropertyLine(**property_line_dict)
+        
+        # Update property_line_simplify with segments if available
+        # Note: Edge indices in segments_data are based on simplified coordinates
+        if segments_data:
+            property_line_simplify_dict = property_line_simplify.model_dump()
+            property_line_simplify_dict["segments"] = segments_data
+            property_line_simplify = PropertyLine(**property_line_simplify_dict)
         
         # Setback line
         # Extract coordinates - could be from setback_result or fallback to property_coords
@@ -1025,7 +1092,8 @@ class PlotAnalysisPipeline:
         )
         
         return Boundaries(
-            property_line=property_line,
+            property_line=property_line,  # Original property line
+            property_line_simplify=property_line_simplify,  # Simplified property line
             setback_line=setback_line,
             buildable_envelope=buildable_envelope
         )

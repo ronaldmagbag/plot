@@ -218,12 +218,18 @@ class GeometryUtils:
     
     @staticmethod
     def get_polygon_edges(
-        coords: List[Tuple[float, float]]
+        coords: List[Tuple[float, float]],
+        center: Optional[Tuple[float, float]] = None
     ) -> List[Dict[str, Any]]:
         """
         Get edges of polygon with their properties
         
+        Args:
+            coords: List of (x, y) coordinate tuples
+            center: Optional polygon center. If not provided, will be calculated.
+        
         Returns list of edges with start, end, length, and direction
+        Direction is determined relative to polygon center, not edge bearing.
         """
         if len(coords) < 2:
             return []
@@ -231,6 +237,11 @@ class GeometryUtils:
         # Ensure closed
         if coords[0] != coords[-1]:
             coords = coords + [coords[0]]
+        
+        # Calculate center if not provided
+        if center is None:
+            center = GeometryUtils.polygon_centroid([list(c) for c in coords])
+            center = (center[0], center[1])
         
         edges = []
         n = len(coords) - 1
@@ -243,24 +254,40 @@ class GeometryUtils:
             dy = end[1] - start[1]
             length = math.sqrt(dx*dx + dy*dy)
             
-            # Calculate direction (bearing from start to end)
-            if length > 0:
-                angle = math.degrees(math.atan2(dx, dy))  # 0 = north, 90 = east
+            # Calculate edge midpoint
+            midpoint = ((start[0] + end[0]) / 2, (start[1] + end[1]) / 2)
+            
+            # Calculate direction from center to edge midpoint
+            # This determines which side of the polygon the edge is on
+            center_to_midpoint_dx = midpoint[0] - center[0]
+            center_to_midpoint_dy = midpoint[1] - center[1]
+            
+            # Calculate bearing from center to midpoint
+            if abs(center_to_midpoint_dx) < 1e-10 and abs(center_to_midpoint_dy) < 1e-10:
+                # Edge midpoint is at center (shouldn't happen, but handle it)
+                angle = 0
+            else:
+                angle = math.degrees(math.atan2(center_to_midpoint_dx, center_to_midpoint_dy))
                 if angle < 0:
                     angle += 360
-            else:
-                angle = 0
             
-            # Determine cardinal direction
+            # Determine cardinal direction based on position relative to center
             direction = GeometryUtils._angle_to_direction(angle)
+            
+            # Also calculate edge bearing for reference
+            edge_bearing = 0
+            if length > 0:
+                edge_bearing = math.degrees(math.atan2(dx, dy))
+                if edge_bearing < 0:
+                    edge_bearing += 360
             
             edges.append({
                 "index": i,
                 "start": start,
                 "end": end,
                 "length_m": length,
-                "bearing": angle,
-                "direction": direction
+                "bearing": edge_bearing,
+                "direction": direction  # Direction relative to center
             })
         
         return edges
@@ -311,6 +338,109 @@ class GeometryUtils:
         closest_y = y1 + t * dy
         
         return math.sqrt((px - closest_x)**2 + (py - closest_y)**2)
+    
+    @staticmethod
+    def distance_line_to_polygon(
+        line_start: Tuple[float, float],
+        line_end: Tuple[float, float],
+        polygon: List[Tuple[float, float]]
+    ) -> float:
+        """
+        Calculate minimum distance from a line segment to a polygon
+        
+        Args:
+            line_start: Start point of line segment (x, y)
+            line_end: End point of line segment (x, y)
+            polygon: List of polygon vertices (x, y)
+        
+        Returns:
+            Minimum distance from line segment to polygon
+        """
+        min_dist = float('inf')
+        
+        # Check distance from line segment to each edge of polygon
+        n = len(polygon)
+        for i in range(n):
+            j = (i + 1) % n
+            poly_edge_start = polygon[i]
+            poly_edge_end = polygon[j]
+            
+            # Distance between two line segments
+            dist = GeometryUtils.distance_line_to_line(
+                line_start, line_end, poly_edge_start, poly_edge_end
+            )
+            min_dist = min(min_dist, dist)
+        
+        # Also check distance from polygon vertices to line segment
+        for vertex in polygon:
+            dist = GeometryUtils.distance_point_to_line(
+                vertex, line_start, line_end
+            )
+            min_dist = min(min_dist, dist)
+        
+        return min_dist
+    
+    @staticmethod
+    def distance_line_to_line(
+        line1_start: Tuple[float, float],
+        line1_end: Tuple[float, float],
+        line2_start: Tuple[float, float],
+        line2_end: Tuple[float, float]
+    ) -> float:
+        """
+        Calculate minimum distance between two line segments
+        
+        Returns the minimum distance between any two points on the line segments
+        """
+        # Check if line segments intersect (distance = 0)
+        # Using parametric form: P = P1 + t*(P2-P1), Q = Q1 + s*(Q2-Q1)
+        p1x, p1y = line1_start
+        p2x, p2y = line1_end
+        q1x, q1y = line2_start
+        q2x, q2y = line2_end
+        
+        # Direction vectors
+        d1x = p2x - p1x
+        d1y = p2y - p1y
+        d2x = q2x - q1x
+        d2y = q2y - q1y
+        
+        # Vector from P1 to Q1
+        w0x = p1x - q1x
+        w0y = p1y - q1y
+        
+        # Check if lines are parallel
+        a = d1x * d1x + d1y * d1y
+        b = d1x * d2x + d1y * d2y
+        c = d2x * d2x + d2y * d2y
+        d = d1x * w0x + d1y * w0y
+        e = d2x * w0x + d2y * w0y
+        denom = a * c - b * b
+        
+        if abs(denom) < 1e-10:
+            # Lines are parallel - check distance from endpoints
+            dist1 = GeometryUtils.distance_point_to_line(line1_start, line2_start, line2_end)
+            dist2 = GeometryUtils.distance_point_to_line(line1_end, line2_start, line2_end)
+            dist3 = GeometryUtils.distance_point_to_line(line2_start, line1_start, line1_end)
+            dist4 = GeometryUtils.distance_point_to_line(line2_end, line1_start, line1_end)
+            return min(dist1, dist2, dist3, dist4)
+        
+        # Calculate closest points on both lines
+        t = (b * e - c * d) / denom
+        s = (a * e - b * d) / denom
+        
+        # Clamp to [0, 1] to stay on line segments
+        t = max(0, min(1, t))
+        s = max(0, min(1, s))
+        
+        # Closest points
+        p_closest = (p1x + t * d1x, p1y + t * d1y)
+        q_closest = (q1x + s * d2x, q1y + s * d2y)
+        
+        # Distance between closest points
+        dx = p_closest[0] - q_closest[0]
+        dy = p_closest[1] - q_closest[1]
+        return math.sqrt(dx*dx + dy*dy)
     
     @staticmethod
     def distance_polygon_to_polygon(

@@ -11,8 +11,8 @@ import os
 class UKRegulatory:
     """Default UK residential building regulations"""
     # Standard setbacks for residential (meters)
-    front_setback_m: float = 4.0
-    rear_setback_m: float = 3.0
+    front_setback_m: float = 5.0
+    rear_setback_m: float = 0.0
     side_setback_m: float = 1.0
     
     # Building constraints
@@ -40,6 +40,17 @@ class UKRegulatory:
     # Edges with angle within this range (relative to road) are classified as front/rear
     # Edges outside this range are classified as side edges
     classifier_parallel_angle_threshold: float = 20.0  # ±20 degrees for front/rear classification
+    
+    # Property line simplification thresholds
+    # Angle threshold: remove points where angle is close to 180° (collinear)
+    property_line_simplify_angle_threshold: float = 170.0  # degrees (178° = good default)
+    # Distance threshold: remove points within this distance from line (meters)
+    property_line_simplify_distance_threshold: float = 0.5  # meters (0.2m = 20cm for UK INSPIRE)
+    
+    # 5-point rectangle classification threshold
+    # Ratio of long edges to short edges for rectangle classification
+    # If avg_long_length >= ratio * avg_short_length, classify as rectangle
+    classifier_5point_rectangle_ratio: float = 1.5  # 1.5x means long edges must be 1.5x longer than short edges
 
 
 @dataclass 

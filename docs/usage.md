@@ -43,13 +43,20 @@ python cli.py generate --lat 53.03896051626191 --lon -1.2221818110142328 --outpu
 python cli.py generate --lat 53.05236708155057 --lon -1.2026009414885899 --output output\v5.json
 
 python cli.py generate --lat 50.9982535962166 --lon -0.10046479985243968 --output output\v6.json
-python cli.py generate --lat 51.013456530550684 --lon -0.08674840435499474 --output output\v7.json
+python cli.py generate --lat 51.013456530550684 --lon -0.08674840435499474 --output output\plot.json
 python cli.py generate --lat 51.01311213839883 --lon -0.08656023924511343 --output output\plot.json
 python cli.py generate --lat 51.015173584845435 --lon -0.08716211166355772 --output output\plot.json
 python cli.py generate --lat 51.01502404603471 --lon -0.0864140785181765 --output output\plot.json
 
 
-50.9982535962166, -0.10046479985243968
+
+51.01520904336192, -0.08635368212130116
+
+51.015113640780115, -0.08677526237228327
+51.01363498081533, -0.09184923057260176
+51.013189776233986, -0.0859934982531432
+python cli.py generate --lat 51.013189776233986 --lon -0.0859934982531432 --output output\plot.json
+
 - Visualization Tests
 python cli.py visualize --input output/plot.json --output output/plot.png
 python scripts/draw_osm_on_mapbox.py --plot-json output/plot.json --cache-dir output/plot --output output/osm.jpg
@@ -144,3 +151,7 @@ python scripts/draw_osm_on_mapbox.py \
     --image output/plot_ash1/mapbox_merged_53.039271_-1.200618_20.0m_z19.jpg \
     --plot-json output/plot_ash1.json \
     --output output/annotated_osm.jpg
+
+
+
+

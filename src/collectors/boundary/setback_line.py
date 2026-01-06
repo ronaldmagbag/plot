@@ -69,10 +69,34 @@ class SetbackLineProcessor:
                 logger.warning("Invalid property polygon")
                 return None
             
+            # Calculate dynamic rear setback if rear_setback_m is 0.0
+            actual_rear_setback_m = self.rear_setback_m
+            if self.rear_setback_m == 0.0:
+                # Calculate dynamically: round(average_side_length/2) - 5
+                side_lengths = []
+                if property_line.left_side:
+                    side_lengths.append(property_line.left_side.length_m)
+                if property_line.right_side:
+                    side_lengths.append(property_line.right_side.length_m)
+                
+                if len(side_lengths) > 0:
+                    # Calculate average of side lengths
+                    average_side_length = sum(side_lengths) / len(side_lengths)
+                    actual_rear_setback_m = round(average_side_length / 2.0) - 5.0
+                    # Ensure minimum of 0
+                    actual_rear_setback_m = max(0.0, actual_rear_setback_m)
+                    logger.info(f"Dynamic rear setback calculated: average_side_length={average_side_length:.2f}m, rear_setback={actual_rear_setback_m:.2f}m (round({average_side_length:.2f}/2) - 5)")
+                else:
+                    logger.warning("Cannot calculate dynamic rear setback: no side edges found, using 0")
+                    actual_rear_setback_m = 0.0
+            else:
+                logger.info(f"Using static rear setback: {actual_rear_setback_m:.2f}m")
+            
             # Calculate setback polygon
             setback_coords = self._calculate_setback_polygon(
                 prop_poly,
-                property_line
+                property_line,
+                actual_rear_setback_m
             )
             
             if not setback_coords or len(setback_coords) < 4:
@@ -91,7 +115,7 @@ class SetbackLineProcessor:
                 setback_type="full",
                 metadata={
                     "front_setback_m": self.front_setback_m,
-                    "rear_setback_m": self.rear_setback_m,
+                    "rear_setback_m": actual_rear_setback_m,
                     "side_setback_m": self.side_setback_m
                 }
             )
@@ -103,7 +127,8 @@ class SetbackLineProcessor:
     def _calculate_setback_polygon(
         self,
         prop_poly: Polygon,
-        property_line: PropertyLine
+        property_line: PropertyLine,
+        rear_setback_m: Optional[float] = None
     ) -> Optional[List[List[float]]]:
         """
         Calculate setback polygon by offsetting edges with variable setbacks
@@ -131,9 +156,12 @@ class SetbackLineProcessor:
                 for edge_idx in property_line.front.edge_indices:
                     edge_classification[edge_idx] = self.front_setback_m
             
+            # Use provided rear_setback_m if given, otherwise use self.rear_setback_m
+            rear_setback = rear_setback_m if rear_setback_m is not None else self.rear_setback_m
+            
             if property_line.rear:
                 for edge_idx in property_line.rear.edge_indices:
-                    edge_classification[edge_idx] = self.rear_setback_m
+                    edge_classification[edge_idx] = rear_setback
             
             if property_line.left_side:
                 for edge_idx in property_line.left_side.edge_indices:

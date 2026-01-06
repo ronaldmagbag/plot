@@ -74,13 +74,30 @@ class PropertyLineClassifier:
             return property_line
         
         try:
-            # Remove duplicate closing point for processing
+            # PropertyLine.coordinates is List[List[float]] = [[lon, lat], ...]
             coords = property_line.coordinates
-            coords_clean = coords[:-1] if (coords[0] == coords[-1] and len(coords) > 1) else coords
             
-            if len(coords_clean) < 4:
-                logger.warning("Property line has too few points for classification")
+            # Remove duplicate closing point for processing
+            coords_clean = coords[:-1] if (coords and len(coords) > 1 and coords[0] == coords[-1]) else coords
+            
+            logger.info(f"Classifier: received {len(coords) if coords else 0} points, after cleaning: {len(coords_clean) if coords_clean else 0} points")
+            
+            if not coords_clean or len(coords_clean) < 3:
+                logger.warning(f"Property line has too few points for classification: {len(coords_clean) if coords_clean else 0}")
                 return property_line
+            
+            # Special case: 4 points (4 edges) after cleaning = rectangle with 2 long edges and 2 short edges
+            # Original polygon has 5 points (first == last to close), after cleaning we have 4 points = 4 edges
+            if len(coords_clean) == 4:
+                logger.info(f"Property line has 4 points (4 edges) after cleaning - checking for rectangle classification...")
+                result = self._classify_5_point_rectangle(
+                    coords_clean, property_line, osm_roads, debug
+                )
+                if result:
+                    logger.info("✅ Using rectangle classification (2 long sides, 2 short sides)")
+                    return result
+                else:
+                    logger.info("Rectangle classification attempted but condition not met, using normal classification")
             
             # Step 1: Find closest road from property line polygon (try named first, then unnamed)
             # This distance is used ONLY for road/segment selection
@@ -786,6 +803,213 @@ class PropertyLineClassifier:
             current = (current + 1) % len(coords)
         
         return left_side_indices, right_side_indices
+    
+    def _classify_5_point_rectangle(
+        self,
+        coords_clean: List[List[float]],
+        property_line: PropertyLine,
+        osm_roads: List[Dict[str, Any]],
+        debug: bool = False
+    ) -> Optional[PropertyLine]:
+        """
+        Special classification for 5-point rectangles (4 edges):
+        - 2 long edges (at least ratio x longer than short edges) = side edges
+        - 2 short edges = front and rear
+        - Short edge closest to road = front
+        - Short edge farthest from road = rear
+        
+        Ratio is configurable via config.uk_regulatory.classifier_5point_rectangle_ratio
+        """
+        config = get_config()
+        ratio_threshold = config.uk_regulatory.classifier_5point_rectangle_ratio
+        # Calculate edge lengths
+        edge_lengths = []
+        edge_data = []
+        
+        for i in range(len(coords_clean)):
+            j = (i + 1) % len(coords_clean)
+            edge_start = coords_clean[i]
+            edge_end = coords_clean[j]
+            
+            # Calculate edge length in meters
+            dx = edge_end[0] - edge_start[0]
+            dy = edge_end[1] - edge_start[1]
+            length_deg = math.sqrt(dx*dx + dy*dy)
+            
+            avg_lat = (edge_start[1] + edge_end[1]) / 2
+            m_per_deg_lat = 111000
+            m_per_deg_lon = 111000 * abs(math.cos(math.radians(avg_lat)))
+            m_per_deg = (m_per_deg_lat + m_per_deg_lon) / 2
+            length_m = length_deg * m_per_deg
+            
+            edge_lengths.append(length_m)
+            edge_data.append({
+                "index": i,
+                "start": edge_start,
+                "end": edge_end,
+                "length_m": length_m
+            })
+        
+        # Sort edges by length
+        sorted_edges = sorted(edge_data, key=lambda e: e["length_m"], reverse=True)
+        long_edges = sorted_edges[:2]  # 2 longest
+        short_edges = sorted_edges[2:]  # 2 shortest
+        
+        # Check if 2 long edges are at least 2x longer than 2 short edges
+        if len(long_edges) < 2 or len(short_edges) < 2:
+            return None
+        
+        avg_long_length = (long_edges[0]["length_m"] + long_edges[1]["length_m"]) / 2
+        avg_short_length = (short_edges[0]["length_m"] + short_edges[1]["length_m"]) / 2
+        actual_ratio = avg_long_length / avg_short_length if avg_short_length > 0 else 0
+        
+        long_lengths_str = ", ".join([f"{e['length_m']:.2f}" for e in long_edges])
+        short_lengths_str = ", ".join([f"{e['length_m']:.2f}" for e in short_edges])
+        logger.info(f"5-point rectangle check: long_edges=[{long_lengths_str}]m (avg={avg_long_length:.2f}m), "
+                   f"short_edges=[{short_lengths_str}]m (avg={avg_short_length:.2f}m), "
+                   f"ratio={actual_ratio:.2f}x (need >= {ratio_threshold}x)")
+        
+        if avg_long_length < ratio_threshold * avg_short_length:
+            # Condition not met - use normal classification
+            logger.info(f"❌ 5-point rectangle condition NOT met: ratio={actual_ratio:.2f}x < {ratio_threshold}x threshold")
+            return None
+        
+        if debug:
+            logger.info(f"=== 5-POINT RECTANGLE CLASSIFICATION ===")
+            logger.info(f"Long edges: {long_edges[0]['length_m']:.2f}m, {long_edges[1]['length_m']:.2f}m (avg: {avg_long_length:.2f}m)")
+            logger.info(f"Short edges: {short_edges[0]['length_m']:.2f}m, {short_edges[1]['length_m']:.2f}m (avg: {avg_short_length:.2f}m)")
+            logger.info(f"Ratio: {actual_ratio:.2f}x (>= {ratio_threshold}x required) ✅")
+        
+        # Find closest road to determine front vs rear
+        prop_poly = Polygon(coords_clean)
+        centroid = prop_poly.centroid
+        centroid_point = Point(centroid.x, centroid.y)
+        
+        # Find closest road
+        closest_road, _ = self._find_closest_named_road(prop_poly, osm_roads)
+        if not closest_road:
+            closest_road, _ = self._find_closest_road(prop_poly, osm_roads)
+        
+        if not closest_road:
+            logger.warning("No road found for 5-point rectangle classification")
+            return None
+        
+        # Get road centerline
+        road_centerline = closest_road.get("centerline", {})
+        road_coords = road_centerline.get("coordinates", [])
+        if not road_coords or len(road_coords) < 2:
+            logger.warning("Invalid road centerline for 5-point rectangle classification")
+            return None
+        
+        from shapely.geometry import LineString
+        road_line = LineString(road_coords)
+        
+        # Calculate distance from each short edge to road
+        short_edge_distances = []
+        for short_edge in short_edges:
+            edge_start = short_edge["start"]
+            edge_end = short_edge["end"]
+            edge_midpoint = Point(
+                (edge_start[0] + edge_end[0]) / 2,
+                (edge_start[1] + edge_end[1]) / 2
+            )
+            
+            # Distance in degrees
+            dist_deg = edge_midpoint.distance(road_line)
+            # Convert to meters
+            avg_lat = edge_midpoint.y
+            m_per_deg_lat = 111000
+            m_per_deg_lon = 111000 * abs(math.cos(math.radians(avg_lat)))
+            m_per_deg = (m_per_deg_lat + m_per_deg_lon) / 2
+            dist_m = dist_deg * m_per_deg
+            
+            short_edge_distances.append({
+                "edge": short_edge,
+                "distance_m": dist_m
+            })
+        
+        # Sort by distance (closest = front, farthest = rear)
+        short_edge_distances.sort(key=lambda x: x["distance_m"])
+        front_edge = short_edge_distances[0]["edge"]
+        rear_edge = short_edge_distances[1]["edge"]
+        
+        # Long edges are sides - need to determine left vs right
+        # In a rectangle going clockwise: front -> right_side -> rear -> left_side -> front
+        front_idx = front_edge["index"]
+        rear_idx = rear_edge["index"]
+        
+        # Find which long edges connect front to rear
+        long_edge_indices = [e["index"] for e in long_edges]
+        
+        # Determine connection points
+        front_end_idx = (front_idx + 1) % len(coords_clean)
+        rear_start_idx = rear_idx
+        rear_end_idx = (rear_idx + 1) % len(coords_clean)
+        front_start_idx = front_idx
+        
+        left_side_idx = None
+        right_side_idx = None
+        
+        # Right side: connects front_end to rear_start (clockwise from front)
+        # Left side: connects rear_end to front_start (clockwise from rear)
+        for long_idx in long_edge_indices:
+            long_start = long_idx
+            long_end = (long_idx + 1) % len(coords_clean)
+            
+            # Check if this long edge connects front_end to rear_start (right side)
+            if long_start == front_end_idx and long_end == rear_start_idx:
+                right_side_idx = long_idx
+            # Check if this long edge connects rear_end to front_start (left side)
+            elif long_start == rear_end_idx and long_end == front_start_idx:
+                left_side_idx = long_idx
+        
+        # Fallback: if not found, walk around polygon to find edges in order
+        if left_side_idx is None or right_side_idx is None:
+            # Find edge that comes immediately after front (should be right side)
+            if right_side_idx is None:
+                next_edge_after_front = (front_end_idx) % len(coords_clean)
+                if next_edge_after_front in long_edge_indices:
+                    right_side_idx = next_edge_after_front
+            
+            # Find edge that comes immediately after rear (should be left side)
+            if left_side_idx is None:
+                next_edge_after_rear = (rear_end_idx) % len(coords_clean)
+                if next_edge_after_rear in long_edge_indices:
+                    left_side_idx = next_edge_after_rear
+            
+            # Final fallback: assign first long edge as right, second as left
+            if right_side_idx is None:
+                right_side_idx = long_edge_indices[0]
+            if left_side_idx is None:
+                left_side_idx = long_edge_indices[1] if len(long_edge_indices) > 1 else long_edge_indices[0]
+        
+        if debug:
+            logger.info(f"Front edge: index {front_idx}, length {front_edge['length_m']:.2f}m, distance to road {short_edge_distances[0]['distance_m']:.2f}m")
+            logger.info(f"Rear edge: index {rear_idx}, length {rear_edge['length_m']:.2f}m, distance to road {short_edge_distances[1]['distance_m']:.2f}m")
+            logger.info(f"Left side: index {left_side_idx}, length {long_edges[0]['length_m']:.2f}m")
+            logger.info(f"Right side: index {right_side_idx}, length {long_edges[1]['length_m']:.2f}m")
+        
+        # Create segments
+        front_segment = self._create_segment_from_indices(
+            coords_clean, [front_idx], SegmentType.FRONT, self.FRONT_COLOR
+        )
+        rear_segment = self._create_segment_from_indices(
+            coords_clean, [rear_idx], SegmentType.REAR, self.REAR_COLOR
+        )
+        left_side_segment = self._create_segment_from_indices(
+            coords_clean, [left_side_idx], SegmentType.LEFT_SIDE, self.SIDE_COLOR
+        )
+        right_side_segment = self._create_segment_from_indices(
+            coords_clean, [right_side_idx], SegmentType.RIGHT_SIDE, self.SIDE_COLOR
+        )
+        
+        # Update property line
+        property_line.front = front_segment
+        property_line.rear = rear_segment
+        property_line.left_side = left_side_segment
+        property_line.right_side = right_side_segment
+        
+        return property_line
     
     def _create_segment_from_indices(
         self,

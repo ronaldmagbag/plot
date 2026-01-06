@@ -84,6 +84,7 @@ class BuildableEnvelope(BaseModel):
 
 class Boundaries(BaseModel):
     property_line: PropertyLine
+    property_line_simplify: Optional[PropertyLine] = None  # Simplified property line (angle + distance)
     setback_line: SetbackLine
     buildable_envelope: BuildableEnvelope
 

@@ -43,8 +43,12 @@ class AdjacencyAnalyzer:
         ref_lat = plot_boundary[0][1]
         local_boundary = GeometryUtils.degrees_to_local(plot_boundary, ref_lon, ref_lat)
         
-        # Get edges
-        edges = GeometryUtils.get_polygon_edges(local_boundary)
+        # Calculate polygon center in local coordinates
+        center_deg = GeometryUtils.polygon_centroid(plot_boundary)
+        center_local = GeometryUtils.degrees_to_local([list(center_deg)], ref_lon, ref_lat)[0]
+        
+        # Get edges (direction determined relative to polygon center)
+        edges = GeometryUtils.get_polygon_edges(local_boundary, center=center_local)
         
         # Prepare feature data in local coords
         local_roads = self._convert_roads_to_local(roads, ref_lon, ref_lat)
@@ -207,11 +211,13 @@ class AdjacencyAnalyzer:
         edge: Dict[str, Any],
         buildings: List[Dict[str, Any]]
     ) -> Optional[Dict[str, Any]]:
-        """Check if edge is adjacent to a building"""
-        edge_midpoint = (
-            (edge["start"][0] + edge["end"][0]) / 2,
-            (edge["start"][1] + edge["end"][1]) / 2
-        )
+        """
+        Check if edge is adjacent to a building
+        
+        For edges adjacent to multiple buildings, returns the building with minimum distance
+        """
+        edge_start = edge["start"]
+        edge_end = edge["end"]
         
         closest_building = None
         min_distance = float('inf')
@@ -221,15 +227,15 @@ class AdjacencyAnalyzer:
             if len(coords) < 3:
                 continue
             
-            # Check distance to building polygon
-            for i in range(len(coords)):
-                j = (i + 1) % len(coords)
-                dist = GeometryUtils.distance_point_to_line(
-                    edge_midpoint, coords[i], coords[j]
-                )
-                if dist < min_distance:
-                    min_distance = dist
-                    closest_building = building
+            # Calculate minimum distance from edge line segment to building polygon
+            # This properly handles long edges that may be adjacent to multiple buildings
+            dist = GeometryUtils.distance_line_to_polygon(
+                edge_start, edge_end, coords
+            )
+            
+            if dist < min_distance:
+                min_distance = dist
+                closest_building = building
         
         if closest_building and min_distance < self.building_threshold:
             return {

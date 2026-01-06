@@ -799,9 +799,15 @@ def cmd_visualize(args):
     # ============================================================
     # LAYER 5: Property boundary with colored segments (front/rear/sides)
     # ============================================================
-    prop_coords = data.get("boundaries", {}).get("property_line", {}).get("coordinates", [[]])[0]
+    # Use simplified property line if available, otherwise use original
+    prop_line_simplify = data.get("boundaries", {}).get("property_line_simplify")
+    if prop_line_simplify:
+        prop_coords = prop_line_simplify.get("coordinates", [[]])[0]
+        segments_data = prop_line_simplify.get("segments", {})
+    else:
+        prop_coords = data.get("boundaries", {}).get("property_line", {}).get("coordinates", [[]])[0]
+        segments_data = data.get("boundaries", {}).get("property_line", {}).get("segments", {})
     local_prop = None  # Initialize for later use in view limits
-    segments_data = data.get("boundaries", {}).get("property_line", {}).get("segments", {})
     
     if prop_coords:
         local_prop = to_local(prop_coords)
@@ -965,6 +971,20 @@ def cmd_visualize(args):
                 ax.add_patch(poly)
             except Exception as e:
                 logger.error(f"Failed to draw property line polygon: {e}")
+        
+        # Draw property line polygon points in white (always draw points, regardless of segments)
+        if local_prop:
+            try:
+                # Filter points within view box
+                margin = VIEW_BBOX * 1.5
+                visible_points = [(x, y) for x, y in local_prop 
+                                if -margin <= x <= margin and -margin <= y <= margin]
+                if visible_points:
+                    xs, ys = zip(*visible_points)
+                    ax.scatter(xs, ys, c='white', s=15, zorder=6, 
+                              edgecolors='black', linewidths=0.5, label='Property Points')
+            except Exception as e:
+                logger.debug(f"Failed to draw property line points: {e}")
     
     # ============================================================
     # LAYER 6: Setback zone (orange dashed)
