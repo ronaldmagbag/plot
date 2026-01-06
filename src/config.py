@@ -151,7 +151,6 @@ class PipelineConfig:
     })
 
 
-# Global config instance
 config = PipelineConfig()
 
 

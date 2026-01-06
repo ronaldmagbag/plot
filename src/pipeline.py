@@ -22,14 +22,13 @@ Data Sources:
 """
 
 import json
-import os
 import math
+import os
 import subprocess
-import sys
-from datetime import datetime
-from typing import Dict, Any, Optional, List, Tuple
 import uuid
+from datetime import datetime
 from pathlib import Path
+from typing import Dict, Any, Optional, List, Tuple
 from loguru import logger
 
 from .config import get_config, PipelineConfig
@@ -184,7 +183,6 @@ class PlotAnalysisPipeline:
             logger.info("Property line detection returned None, using default rectangular plot estimate")
             boundary_data = self.boundary_collector._create_default_plot(lat, lon)
         
-        # Extract property coordinates - handle GeoJSON Polygon format
         coords_raw = boundary_data.get("coordinates", [])
         source_name = boundary_data.get("source", "unknown")
         
@@ -196,28 +194,19 @@ class PlotAnalysisPipeline:
             coords_raw = boundary_data.get("coordinates", [])
             source_name = boundary_data.get("source", "unknown")
         
-        # Extract first coordinate ring from GeoJSON Polygon format
-        # Handle both correct format [[[lon, lat], ...]] and double-wrapped [[[[lon, lat], ...]]]
         property_coords = []
         
         if isinstance(coords_raw, list) and len(coords_raw) > 0:
             first_element = coords_raw[0]
             
-            # Check if double-wrapped: [[[[lon, lat], ...]]]
             if isinstance(first_element, list) and len(first_element) > 0:
-                # Safely check second_element
                 second_element = first_element[0] if len(first_element) > 0 else None
                 
-                # Check if second_element is a list of coordinate pairs (double-wrapped case)
                 if isinstance(second_element, list) and len(second_element) > 0:
-                    # Safely check if second_element contains coordinate pairs
                     if len(second_element) > 0 and isinstance(second_element[0], list) and len(second_element[0]) == 2:
-                        # Double-wrapped: [[[[lon, lat], ...]]]
-                        # second_element is the actual ring with coordinate pairs
                         property_coords = second_element
                         logger.debug(f"Extracted coordinates from double-wrapped format: {len(property_coords)} points")
                     elif len(first_element) > 0 and isinstance(first_element[0], list) and len(first_element[0]) == 2:
-                        # Correct format: [[[lon, lat], ...]]
                         property_coords = first_element
                         logger.debug(f"Extracted coordinates from correct nested format: {len(property_coords)} points")
                     else:
@@ -228,11 +217,9 @@ class PlotAnalysisPipeline:
                             logger.error(f"  second_element[0] type: {type(second_element[0])}")
                         property_coords = []
                 elif isinstance(second_element, (int, float)):
-                    # second_element is a number, not a list - this shouldn't happen
                     logger.error(f"Unexpected: second_element is a number: {second_element}")
                     property_coords = []
                 elif len(first_element) > 0 and isinstance(first_element[0], list) and len(first_element[0]) == 2:
-                    # Format [[[lon, lat], ...]] - correct GeoJSON Polygon
                     property_coords = first_element
                     logger.debug(f"Extracted coordinates from correct format: {len(property_coords)} points")
                 else:
@@ -248,14 +235,11 @@ class PlotAnalysisPipeline:
             logger.error(f"Invalid coordinates structure: type={type(coords_raw)}, length={len(coords_raw) if isinstance(coords_raw, list) else 'N/A'}")
             property_coords = []
         
-        # CRITICAL: Final validation - ensure we have valid coordinates
         if property_coords:
-            # Double-check that property_coords is actually a list of coordinate pairs
             if not isinstance(property_coords, list):
                 logger.error(f"property_coords is not a list: {type(property_coords)}")
                 property_coords = []
             elif len(property_coords) > 0:
-                # Check first coordinate is valid
                 first_coord = property_coords[0]
                 if not isinstance(first_coord, list) or len(first_coord) != 2:
                     logger.error(f"First coordinate is invalid: {first_coord} (type: {type(first_coord)})")
@@ -283,8 +267,6 @@ class PlotAnalysisPipeline:
             else:
                 property_coords = []
         
-        # Store original property coordinates before simplification
-        # Use deep copy to ensure original is preserved
         import copy
         property_coords_original = copy.deepcopy(property_coords) if property_coords else []
         
@@ -475,17 +457,12 @@ class PlotAnalysisPipeline:
             accuracy_m=boundary_data.get("accuracy_m", 5.0)
         )
         
-        # Simplify property line using boundary collector (handles simplification internally)
         logger.info("Simplifying property line using boundary collector...")
         property_line_obj = self.boundary_collector.simplify_property_line(property_line_obj_original)
-        
-        # Update property_coords to use simplified coordinates
         property_coords = property_line_obj.coordinates
         
-        # Preliminary adjacency for setback calculation (using simplified coordinates)
         preliminary_adjacency = self._quick_adjacency(property_coords, osm_roads)
         
-        # Classify simplified property line with full OSM data
         logger.info(f"Classifying simplified property line with full OSM data... (coordinates: {len(property_coords)} points)")
         property_line_obj = self.boundary_collector.classifier.classify(
             property_line_obj,
@@ -494,15 +471,12 @@ class PlotAnalysisPipeline:
             debug=False
         )
         
-        # If we got a property line object, use it; otherwise fall back to old method
         if property_line_obj:
-            # Use new boundary collector methods
             setback_line_obj = self.boundary_collector.get_setback_line(property_line_obj)
             buildable_envelope_obj = self.boundary_collector.get_buildable_envelope(
                 property_line_obj, setback_line_obj
             )
             
-            # Convert to old format for compatibility
             if setback_line_obj:
                 # Get actual applied setbacks from metadata (includes dynamic rear setback)
                 metadata = setback_line_obj.metadata
@@ -517,15 +491,12 @@ class PlotAnalysisPipeline:
                     "area_sqm": setback_line_obj.area_sqm,
                     "setbacks_applied": {
                         "front_m": front_setback,
-                        "rear_m": rear_setback,  # This will be the dynamic value if calculated
+                        "rear_m": rear_setback,
                         "side_east_m": side_setback,
                         "side_west_m": side_setback
                     },
                     "regulation_source": "uk_planning_guidance"
                 }
-                # setback_line_obj.coordinates is [[lon, lat], ...] format
-                # setback_result["coordinates"] is already [[[lon, lat], ...]] (GeoJSON format)
-                # No need to set setback_coords here - it will be extracted from setback_result later
             else:
                 setback_result = None
             
@@ -540,39 +511,45 @@ class PlotAnalysisPipeline:
                 logger.warning("Buildable envelope calculation returned None - will fall back to setback line")
                 buildable_result = None
         else:
-            # Fallback to old method
             setback_result = self.setback_calculator.calculate_setbacks(
                 property_coords, preliminary_adjacency
             )
             setback_coords = setback_result["coordinates"][0] if setback_result else property_coords
             
-            # Calculate buildable envelope (pass neighbor buildings for constraint checking)
             buildable_result = self.setback_calculator.calculate_buildable_envelope(
                 setback_coords, 
                 constraints=[],
                 property_area_sqm=property_area,
                 neighbor_buildings=neighbor_buildings
             )
+            # Note: access_corridor will be updated after adjacency_result is calculated
         
-        # Full adjacency analysis
         adjacency_result = self.adjacency_analyzer.analyze(
             property_coords, osm_roads, osm_buildings, water_features_raw
         )
         
-        # Shadow analysis
+        # Calculate access corridor after adjacency analysis is available
+        if buildable_result:
+            buildable_area = buildable_result.get("area_sqm", 0)
+            access_corridor_data = self.setback_calculator._determine_access_corridor(
+                property_area, buildable_area, adjacency_result, property_line_obj, property_coords
+            )
+            buildable_result["access_corridor"] = access_corridor_data
+        else:
+            # Fallback: calculate even if buildable_result is None
+            access_corridor_data = self.setback_calculator._determine_access_corridor(
+                property_area, 0, adjacency_result, property_line_obj, property_coords
+            )
+            buildable_result = {"access_corridor": access_corridor_data}
+        
         shadow_result = self.shadow_analyzer.analyze(
             (lon, lat), property_coords, osm_buildings
         )
         
-        # ============================================================
-        # STAGE 4: Build Output Model
-        # ============================================================
         logger.info("Stage 4: Building output model...")
         
-        # Use calculated centroid from property polygon (not input lat/lon)
         centroid = GeoJSONPoint(coordinates=[centroid_lon, centroid_lat])
         
-        # Boundaries
         boundaries = self._build_boundaries(
             property_coords, property_area, property_perimeter,
             setback_result, buildable_result, boundary_data,
@@ -616,7 +593,6 @@ class PlotAnalysisPipeline:
             elevation_data=elevation_data
         )
         
-        # Build complete plot analysis
         plot_analysis = PlotAnalysis(
             plot_id=plot_id,
             created_at=timestamp,
@@ -642,15 +618,10 @@ class PlotAnalysisPipeline:
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         
         with open(output_path, "w", encoding="utf-8") as f:
-            # Use mode='python' to ensure custom model_dump methods are called recursively
             json.dump(plot_analysis.model_dump(mode='python'), f, indent=2, ensure_ascii=False)
         
         logger.info(f"Saved plot analysis to {output_path}")
         return output_path
-    
-    # ============================================================
-    # Helper Methods
-    # ============================================================
     
     def _run_sam3_segmentation(
         self,
@@ -747,7 +718,6 @@ class PlotAnalysisPipeline:
                 logger.warning(f"SAM3 segmentation failed: {result.stderr}")
                 return None
             
-            # Load results
             if output_path.exists():
                 with open(output_path, "r") as f:
                     results = json.load(f)
@@ -773,7 +743,6 @@ class PlotAnalysisPipeline:
         if not property_coords or len(property_coords) < 4:
             return []
         
-        # Simple check - find the edge closest to a road
         ref_lon, ref_lat = property_coords[0]
         local_boundary = GeometryUtils.degrees_to_local(property_coords, ref_lon, ref_lat)
         edges = GeometryUtils.get_polygon_edges(local_boundary)
@@ -786,7 +755,6 @@ class PlotAnalysisPipeline:
                 "shared_wall_potential": False
             })
         
-        # Check for road adjacency
         for road in roads:
             road_coords = road.get("centerline", {}).get("coordinates", [])
             if not road_coords:
@@ -829,11 +797,8 @@ class PlotAnalysisPipeline:
         property_line_original_coords = property_coords_original if property_coords_original else property_coords
         logger.info(f"Property line: {len(property_line_original_coords)} original points, {len(property_coords)} simplified points")
         
-        # Add segments if property_line_obj has them (based on simplified coordinates)
         segments_data = None
         if property_line_obj and hasattr(property_line_obj, 'front'):
-            # Store segment information for visualization
-            # Store edge indices instead of coordinates to avoid duplication
             segments_data = {}
             
             if property_line_obj.front:
@@ -861,7 +826,6 @@ class PlotAnalysisPipeline:
                     "color": property_line_obj.right_side.color
                 }
         
-        # Create PropertyLine with original coordinates, simplified coordinates, and segments
         property_line = PropertyLine(
             coordinates=[property_line_original_coords],
             coordinates_simplified=[property_coords],
@@ -873,11 +837,7 @@ class PlotAnalysisPipeline:
             segments=segments_data
         )
         
-        # Setback line
-        # Extract coordinates - could be from setback_result or fallback to property_coords
         if setback_result and setback_result.get("coordinates"):
-            # setback_result["coordinates"] is [[[lon, lat], ...]] (GeoJSON Polygon format)
-            # Extract first ring: [[lon, lat], ...]
             setback_coords_raw = setback_result["coordinates"][0]
         else:
             # property_coords is already [[lon, lat], [lon, lat], ...] format
@@ -921,20 +881,16 @@ class PlotAnalysisPipeline:
                 logger.debug(f"Setback coords format check: first element type={type(first_elem)}, value={first_elem if isinstance(first_elem, (int, float)) else 'list'}")
                 
                 if isinstance(first_elem, list):
-                    # Check if it's nested lists (GeoJSON format) or list of pairs
                     if len(first_elem) > 0 and isinstance(first_elem[0], list):
-                        # Already in GeoJSON format: [[[lon, lat], ...]]
                         setback_coords_formatted = setback_coords_raw
                         logger.debug("Setback coords already in GeoJSON format")
                     elif len(first_elem) >= 2 and isinstance(first_elem[0], (int, float)):
-                        # List of pairs: [[lon, lat], [lon, lat], ...] - wrap in GeoJSON Polygon format
                         setback_coords_formatted = [setback_coords_raw]
                         logger.debug(f"Setback coords wrapped: {len(setback_coords_raw)} pairs")
                     else:
                         logger.error(f"Unexpected nested format in setback_coords_raw[0]: {type(first_elem[0]) if first_elem else 'empty'}")
                         setback_coords_formatted = [property_coords]
                 elif isinstance(first_elem, (int, float)):
-                    # Flat list: [lon, lat, lon, lat, ...] - convert to pairs then wrap
                     if len(setback_coords_raw) % 2 != 0:
                         logger.error(f"Flat coordinate list has odd length: {len(setback_coords_raw)}")
                         setback_coords_formatted = [property_coords]
@@ -976,7 +932,7 @@ class PlotAnalysisPipeline:
         access_corridor_data = buildable_result.get("access_corridor", {}) if buildable_result else {}
         
         access_corridor = None
-        if access_corridor_data.get("required"):
+        if access_corridor_data and access_corridor_data.get("required"):
             access_corridor = AccessCorridor(
                 required=True,
                 width_m=access_corridor_data.get("width_m", 3.5),

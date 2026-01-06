@@ -144,10 +144,6 @@ def get_polygon_centroid(coords: List[List[float]]) -> Tuple[float, float]:
     return (lon_sum / len(coords_clean), lat_sum / len(coords_clean))
 
 
-# ============================================================
-# Property Line Simplification Functions (NEW)
-# ============================================================
-
 def angle_deg(a: Tuple[float, float], b: Tuple[float, float], c: Tuple[float, float]) -> float:
     """
     Calculate angle ABC in degrees

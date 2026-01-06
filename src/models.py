@@ -10,10 +10,6 @@ import uuid
 from dataclasses import asdict
 
 
-# ============================================================
-# GeoJSON Types
-# ============================================================
-
 class GeoJSONPoint(BaseModel):
     type: Literal["Point"] = "Point"
     coordinates: List[float]  # [longitude, latitude]
@@ -26,12 +22,8 @@ class GeoJSONPolygon(BaseModel):
 
 class GeoJSONLineString(BaseModel):
     type: Literal["LineString"] = "LineString"
-    coordinates: List[List[float]]  # [[lon, lat], ...]
+    coordinates: List[List[float]]
 
-
-# ============================================================
-# Boundary Models
-# ============================================================
 
 class SetbacksApplied(BaseModel):
     front_m: float
@@ -167,10 +159,6 @@ class SurroundingContext(BaseModel):
     water_features: WaterFeatures
 
 
-# ============================================================
-# Analysis Models
-# ============================================================
-
 class FacadeScore(BaseModel):
     winter_avg: float
     summer_avg: float
@@ -249,10 +237,6 @@ class Access(BaseModel):
     pedestrian_access: PedestrianAccess
 
 
-# ============================================================
-# Existing Structures
-# ============================================================
-
 class ExistingStructure(BaseModel):
     id: str
     footprint: GeoJSONPolygon
@@ -265,10 +249,6 @@ class ExistingStructure(BaseModel):
     demolition_cost_estimate_gbp: Optional[float] = None
     affects_buildable_area: bool = True
 
-
-# ============================================================
-# Regulatory Models
-# ============================================================
 
 class Zoning(BaseModel):
     designation: str
@@ -321,10 +301,6 @@ class Soil(BaseModel):
     properties: Optional[Dict[str, Any]] = Field(default_factory=dict)
 
 
-# ============================================================
-# Data Quality Model
-# ============================================================
-
 class DataSource(BaseModel):
     type: str
     source: str
@@ -339,10 +315,6 @@ class DataQuality(BaseModel):
     missing_data: List[str] = Field(default_factory=list)
     last_validated: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
 
-
-# ============================================================
-# Main Plot Analysis Model
-# ============================================================
 
 PlotType = Literal[
     "residential_building",

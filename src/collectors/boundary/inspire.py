@@ -228,7 +228,7 @@ class InspireHandler:
                 "coordinates": coords,
                 "area_sqm": area_sqm,
                 "source": "inspire_cadastral",
-                "accuracy_m": 0.5,  # INSPIRE cadastral data is very accurate
+                "accuracy_m": 2.0,  # INSPIRE cadastral data is accurate(2~3m)
                 "inspire_id": inspire_id,
                 "inspire_source_file": source_file
             }

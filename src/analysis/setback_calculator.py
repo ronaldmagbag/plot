@@ -179,8 +179,8 @@ class SetbackCalculator:
         # Calculate area
         area = GeometryUtils.polygon_area_local(buildable_local)
         
-        # Determine if access corridor is needed
-        access_corridor = self._determine_access_corridor(property_area_sqm, area)
+        # Determine if access corridor is needed (will be updated with adjacency_result later in pipeline)
+        access_corridor = self._determine_access_corridor(property_area_sqm, area, None)
         
         return {
             "type": "Polygon",
@@ -416,17 +416,109 @@ class SetbackCalculator:
     def _determine_access_corridor(
         self,
         property_area: float,
-        buildable_area: float
+        buildable_area: float,
+        adjacency_result: Optional[List[Dict[str, Any]]] = None,
+        property_line_obj: Optional[Any] = None,
+        property_coords: Optional[List[List[float]]] = None
     ) -> Dict[str, Any]:
         """Determine if an access corridor is required"""
         
         # Larger plots typically need vehicle access
         needs_vehicle_access = property_area > 200  # sqm
         
+        if not needs_vehicle_access:
+            return {
+                "required": False,
+                "width_m": 0,
+                "description": "",
+                "affects_buildable_area": False
+            }
+        
+        # Determine road side from front edge (most accurate)
+        road_side = None
+        if property_line_obj and hasattr(property_line_obj, 'front') and property_line_obj.front:
+            # Get front edge coordinates
+            front_coords = property_line_obj.front.get_coordinates(property_line_obj.coordinates)
+            if front_coords and len(front_coords) >= 2 and property_coords:
+                # Calculate property center
+                center_lon = sum(c[0] for c in property_coords) / len(property_coords)
+                center_lat = sum(c[1] for c in property_coords) / len(property_coords)
+                
+                # Calculate front edge midpoint
+                front_mid_lon = sum(c[0] for c in front_coords) / len(front_coords)
+                front_mid_lat = sum(c[1] for c in front_coords) / len(front_coords)
+                
+                # Calculate direction from center to front edge midpoint
+                dx = front_mid_lon - center_lon
+                dy = front_mid_lat - center_lat
+                
+                # Determine cardinal direction
+                import math
+                angle = math.degrees(math.atan2(dx, dy))
+                if angle < 0:
+                    angle += 360
+                
+                # Convert angle to direction
+                if angle < 22.5 or angle >= 337.5:
+                    road_side = "north"
+                elif angle < 67.5:
+                    road_side = "northeast"
+                elif angle < 112.5:
+                    road_side = "east"
+                elif angle < 157.5:
+                    road_side = "southeast"
+                elif angle < 202.5:
+                    road_side = "south"
+                elif angle < 247.5:
+                    road_side = "southwest"
+                elif angle < 292.5:
+                    road_side = "west"
+                else:
+                    road_side = "northwest"
+                
+                # Simplify to main directions
+                if "northeast" in road_side or "northwest" in road_side:
+                    # Use dominant direction (north or west)
+                    if abs(dx) > abs(dy):
+                        road_side = "west" if dx < 0 else "east"
+                    else:
+                        road_side = "north" if dy > 0 else "south"
+                elif "southeast" in road_side or "southwest" in road_side:
+                    if abs(dx) > abs(dy):
+                        road_side = "west" if dx < 0 else "east"
+                    else:
+                        road_side = "south"
+        
+        # Fallback to adjacency analysis if front edge not available
+        if not road_side and adjacency_result:
+            for edge in adjacency_result:
+                if edge.get("adjacent_to") == "street":
+                    edge_id = edge.get("edge_id", "")
+                    # Extract direction from edge_id (e.g., "north_edge_0" -> "north")
+                    if "north" in edge_id and "west" not in edge_id and "east" not in edge_id:
+                        road_side = "north"
+                    elif "south" in edge_id and "west" not in edge_id and "east" not in edge_id:
+                        road_side = "south"
+                    elif "east" in edge_id and "north" not in edge_id and "south" not in edge_id:
+                        road_side = "east"
+                    elif "west" in edge_id and "north" not in edge_id and "south" not in edge_id:
+                        road_side = "west"
+                    break
+        
+        # Determine destination based on property size
+        # Large properties (>200 sqm) typically have garages, smaller ones have parking areas
+        destination = "potential garage location" if property_area > 200 else "parking area"
+        
+        # Build description
+        if road_side:
+            description = f"Vehicle access from {road_side} side to {destination}"
+        else:
+            description = f"Vehicle access corridor to {destination}"
+        
         return {
-            "required": needs_vehicle_access,
-            "width_m": 3.5 if needs_vehicle_access else 0,
-            "description": "Vehicle access corridor for driveway" if needs_vehicle_access else "",
+            "required": True,
+            "width_m": 3.5,
+            "description": description,
             "affects_buildable_area": False  # Usually within setback zone
         }
 
