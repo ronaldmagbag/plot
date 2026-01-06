@@ -135,6 +135,8 @@ class PropertyLine:
     
     # Metadata
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+
     
     def to_geojson(self) -> Dict[str, Any]:
         """Convert to GeoJSON format"""

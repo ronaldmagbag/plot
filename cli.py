@@ -799,14 +799,14 @@ def cmd_visualize(args):
     # ============================================================
     # LAYER 5: Property boundary with colored segments (front/rear/sides)
     # ============================================================
-    # Use simplified property line if available, otherwise use original
-    prop_line_simplify = data.get("boundaries", {}).get("property_line_simplify")
-    if prop_line_simplify:
-        prop_coords = prop_line_simplify.get("coordinates", [[]])[0]
-        segments_data = prop_line_simplify.get("segments", {})
+    # Use simplified property line coordinates if available, otherwise use original
+    property_line_data = data.get("boundaries", {}).get("property_line", {})
+    if property_line_data.get("coordinates_simplified"):
+        prop_coords = property_line_data.get("coordinates_simplified", [[]])[0]
+        segments_data = property_line_data.get("segments", {})
     else:
-        prop_coords = data.get("boundaries", {}).get("property_line", {}).get("coordinates", [[]])[0]
-        segments_data = data.get("boundaries", {}).get("property_line", {}).get("segments", {})
+        prop_coords = property_line_data.get("coordinates", [[]])[0]
+        segments_data = property_line_data.get("segments", {})
     local_prop = None  # Initialize for later use in view limits
     
     if prop_coords:

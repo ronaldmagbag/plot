@@ -278,7 +278,11 @@ def load_property_line(plot_json_path: Path) -> Optional[List[List[float]]]:
             data = json.load(f)
         
         prop_line = data.get("boundaries", {}).get("property_line", {})
-        coords = prop_line.get("coordinates", [[]])[0]
+        # Use simplified coordinates if available, otherwise use original
+        if prop_line.get("coordinates_simplified"):
+            coords = prop_line.get("coordinates_simplified", [[]])[0]
+        else:
+            coords = prop_line.get("coordinates", [[]])[0]
         
         if not coords:
             logger.warning("No property line coordinates found in JSON")

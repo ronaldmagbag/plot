@@ -5,8 +5,9 @@ Matches the exact JSON schema from documentation
 
 from datetime import datetime
 from typing import List, Optional, Dict, Any, Literal
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer
 import uuid
+from dataclasses import asdict
 
 
 # ============================================================
@@ -62,6 +63,7 @@ class PropertyLine(BaseModel):
     source_date: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
     accuracy_m: float = 2.0
     segments: Optional[Dict[str, Any]] = None  # Front, rear, left_side, right_side segments with colors
+    coordinates_simplified: Optional[List[List[List[float]]]] = None  # Simplified coordinates (angle + distance)
 
 
 class SetbackLine(BaseModel):
@@ -84,7 +86,6 @@ class BuildableEnvelope(BaseModel):
 
 class Boundaries(BaseModel):
     property_line: PropertyLine
-    property_line_simplify: Optional[PropertyLine] = None  # Simplified property line (angle + distance)
     setback_line: SetbackLine
     buildable_envelope: BuildableEnvelope
 

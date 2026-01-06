@@ -43,7 +43,7 @@ class UKRegulatory:
     
     # Property line simplification thresholds
     # Angle threshold: remove points where angle is close to 180° (collinear)
-    property_line_simplify_angle_threshold: float = 170.0  # degrees (178° = good default)
+    property_line_simplify_angle_threshold: float = 170.0  # degrees (176° = good default)
     # Distance threshold: remove points within this distance from line (meters)
     property_line_simplify_distance_threshold: float = 0.8  # meters (0.2m = 20cm for UK INSPIRE)
     

@@ -504,14 +504,22 @@ class PlotAnalysisPipeline:
             
             # Convert to old format for compatibility
             if setback_line_obj:
+                # Get actual applied setbacks from metadata (includes dynamic rear setback)
+                metadata = setback_line_obj.metadata
+                front_setback = metadata.get("front_setback_m", self.config.uk_regulatory.front_setback_m)
+                rear_setback = metadata.get("rear_setback_m", self.config.uk_regulatory.rear_setback_m)
+                side_setback = metadata.get("side_setback_m", self.config.uk_regulatory.side_setback_m)
+                
+                logger.info(f"Setbacks applied - Front: {front_setback}m, Rear: {rear_setback}m, Side: {side_setback}m")
+                
                 setback_result = {
                     "coordinates": [setback_line_obj.coordinates],
                     "area_sqm": setback_line_obj.area_sqm,
                     "setbacks_applied": {
-                        "front_m": setback_line_obj.metadata.get("front_rear_setback_m", 4.0),
-                        "rear_m": setback_line_obj.metadata.get("front_rear_setback_m", 4.0),
-                        "side_east_m": setback_line_obj.metadata.get("side_setback_m", 1.0),
-                        "side_west_m": setback_line_obj.metadata.get("side_setback_m", 1.0)
+                        "front_m": front_setback,
+                        "rear_m": rear_setback,  # This will be the dynamic value if calculated
+                        "side_east_m": side_setback,
+                        "side_west_m": side_setback
                     },
                     "regulation_source": "uk_planning_guidance"
                 }
@@ -569,7 +577,7 @@ class PlotAnalysisPipeline:
             property_coords, property_area, property_perimeter,
             setback_result, buildable_result, boundary_data,
             property_line_obj,  # Pass property line object for segments
-            property_coords_original  # Pass original coordinates for property_line_simplify
+            property_coords_original  # Pass original coordinates for property_line
         )
         
         # Surrounding context (use filtered neighbor_buildings, not all osm_buildings)
@@ -634,7 +642,8 @@ class PlotAnalysisPipeline:
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         
         with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(plot_analysis.model_dump(), f, indent=2, ensure_ascii=False)
+            # Use mode='python' to ensure custom model_dump methods are called recursively
+            json.dump(plot_analysis.model_dump(mode='python'), f, indent=2, ensure_ascii=False)
         
         logger.info(f"Saved plot analysis to {output_path}")
         return output_path
@@ -816,30 +825,11 @@ class PlotAnalysisPipeline:
         property_coords_original is the ORIGINAL version (stored as property_line)
         """
         
-        # Property line (ORIGINAL) - store original coordinates
+        # Property line - store original coordinates and simplified coordinates
         property_line_original_coords = property_coords_original if property_coords_original else property_coords
-        property_line = PropertyLine(
-            coordinates=[property_line_original_coords],
-            area_sqm=round(property_area, 1),
-            perimeter_m=round(property_perimeter, 1),
-            source=boundary_data.get("source", "estimated"),
-            source_date=datetime.utcnow().isoformat(),
-            accuracy_m=boundary_data.get("accuracy_m", 5.0)
-        )
+        logger.info(f"Property line: {len(property_line_original_coords)} original points, {len(property_coords)} simplified points")
         
-        # Property line (SIMPLIFIED) - property_coords is already simplified
-        # Log to verify simplification is working
-        logger.info(f"Creating property_line_simplify: {len(property_coords)} points (original had {len(property_line_original_coords)} points)")
-        property_line_simplify = PropertyLine(
-            coordinates=[property_coords],
-            area_sqm=round(property_area, 1),  # Area should be similar
-            perimeter_m=round(property_perimeter, 1),  # Perimeter may be slightly different
-            source=boundary_data.get("source", "estimated") + "_simplified",
-            source_date=datetime.utcnow().isoformat(),
-            accuracy_m=boundary_data.get("accuracy_m", 5.0)
-        )
-        
-        # Add segments if property_line_obj has them
+        # Add segments if property_line_obj has them (based on simplified coordinates)
         segments_data = None
         if property_line_obj and hasattr(property_line_obj, 'front'):
             # Store segment information for visualization
@@ -871,18 +861,17 @@ class PlotAnalysisPipeline:
                     "color": property_line_obj.right_side.color
                 }
         
-        # Update property_line (original) with segments if available
-        if segments_data:
-            property_line_dict = property_line.model_dump()
-            property_line_dict["segments"] = segments_data
-            property_line = PropertyLine(**property_line_dict)
-        
-        # Update property_line_simplify with segments if available
-        # Note: Edge indices in segments_data are based on simplified coordinates
-        if segments_data:
-            property_line_simplify_dict = property_line_simplify.model_dump()
-            property_line_simplify_dict["segments"] = segments_data
-            property_line_simplify = PropertyLine(**property_line_simplify_dict)
+        # Create PropertyLine with original coordinates, simplified coordinates, and segments
+        property_line = PropertyLine(
+            coordinates=[property_line_original_coords],
+            coordinates_simplified=[property_coords],
+            area_sqm=round(property_area, 1),
+            perimeter_m=round(property_perimeter, 1),
+            source=boundary_data.get("source", "estimated"),
+            source_date=datetime.utcnow().isoformat(),
+            accuracy_m=boundary_data.get("accuracy_m", 5.0),
+            segments=segments_data
+        )
         
         # Setback line
         # Extract coordinates - could be from setback_result or fallback to property_coords
@@ -967,10 +956,10 @@ class PlotAnalysisPipeline:
             coordinates=setback_coords_formatted,
             area_sqm=setback_area,
             setbacks_applied=SetbacksApplied(
-                front_m=setbacks_applied.get("front_m", 5.0),
-                rear_m=setbacks_applied.get("rear_m", 5.0),
-                side_east_m=setbacks_applied.get("side_east_m", 1.0),
-                side_west_m=setbacks_applied.get("side_west_m", 1.0)
+                front_m=setbacks_applied.get("front_m", self.config.uk_regulatory.front_setback_m),
+                rear_m=setbacks_applied.get("rear_m", self.config.uk_regulatory.rear_setback_m),
+                side_east_m=setbacks_applied.get("side_east_m", self.config.uk_regulatory.side_setback_m),
+                side_west_m=setbacks_applied.get("side_west_m", self.config.uk_regulatory.side_setback_m)
             ),
             regulation_source=setback_result.get("regulation_source", "uk_planning_guidance") if setback_result else "uk_planning_guidance"
         )
@@ -1067,8 +1056,7 @@ class PlotAnalysisPipeline:
         )
         
         return Boundaries(
-            property_line=property_line,  # Original property line
-            property_line_simplify=property_line_simplify,  # Simplified property line
+            property_line=property_line,  # Contains original coordinates, simplified coordinates, and segments
             setback_line=setback_line,
             buildable_envelope=buildable_envelope
         )
