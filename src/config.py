@@ -32,8 +32,8 @@ class UKRegulatory:
     ])
     
     # Property line thresholds
-    property_line_max_area_sqm: float = 2000.0  # If property > this, use OSM logic
-    property_line_max_perimeter_m: float = 200.0  # If perimeter > this, use OSM logic
+    property_line_max_area_sqm: float = 3000.0  # If property > this, use OSM logic
+    property_line_max_perimeter_m: float = 250.0  # If perimeter > this, use OSM logic
     property_line_min_side_distance_m: float = 3.0  # If side distance < this, consider merging
     
     # Property line classifier angle thresholds (degrees)

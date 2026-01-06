@@ -376,11 +376,12 @@ def simplify_property_line(
     center_lat: Optional[float] = None
 ) -> List[List[float]]:
     """
-    Simplify property line polygon using angle-first, then distance algorithm
+    Simplify property line polygon using angle-first, then distance, then angle again algorithm
     
     Process:
     1. First simplify by angle (remove collinear points)
     2. Then simplify by distance (remove points close to line segments)
+    3. If distance simplification removed points, simplify by angle again (removes new collinear points)
     
     Args:
         coords: List of [x, y] or [lon, lat] coordinate pairs
@@ -402,18 +403,28 @@ def simplify_property_line(
     
     # Step 1: Simplify by angle first
     simplified = simplify_polygon_by_angle(coords, angle_threshold)
-    angle_reduced = len(coords) - len(simplified)
+    angle_reduced_1 = len(coords) - len(simplified)
     
     # Step 2: Then simplify by distance
+    before_distance = len(simplified)
     simplified = simplify_polygon_by_distance(simplified, distance_threshold, center_lat)
-    distance_reduced = (len(coords) - angle_reduced) - len(simplified)
+    distance_reduced = before_distance - len(simplified)
+    
+    # Step 3: If distance simplification removed points, do angle simplification again
+    angle_reduced_2 = 0
+    if distance_reduced > 0:
+        before_angle_2 = len(simplified)
+        simplified = simplify_polygon_by_angle(simplified, angle_threshold)
+        angle_reduced_2 = before_angle_2 - len(simplified)
     
     final_count = len(simplified)
     total_reduced = original_count - final_count
+    total_angle_reduced = angle_reduced_1 + angle_reduced_2
     
     if total_reduced > 0:
         logger.info(f"Property line simplified: {original_count} → {final_count} points "
-                   f"(angle: -{angle_reduced}, distance: -{distance_reduced}, total: -{total_reduced})")
+                   f"(angle: -{angle_reduced_1}, distance: -{distance_reduced}, "
+                   f"angle(2nd): -{angle_reduced_2}, total: -{total_reduced})")
     else:
         logger.info(f"Property line simplification: no points removed (original: {original_count} points)")
     

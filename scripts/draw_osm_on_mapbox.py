@@ -327,7 +327,7 @@ def draw_water_features(
     outline_color: Tuple[int, int, int, int],
     outline_width: int = 1
 ):
-    """Draw water features as polygons"""
+    """Draw water features as polygons and lines"""
     drawn_count = 0
     
     for feature in water_features:
@@ -360,6 +360,22 @@ def draw_water_features(
                                 pixel_coords.append(pixel_coords[0])
                             draw.polygon(pixel_coords, fill=fill_color, outline=outline_color, width=outline_width)
                             drawn_count += 1
+        elif geom_type == "LineString" and coords:
+            # LineString coordinates: [[lon, lat], [lon, lat], ...]
+            if len(coords) >= 2:
+                pixel_coords = coords_to_pixels(coords, bbox, image_size)
+                if len(pixel_coords) >= 2:
+                    # Draw line with thicker width for visibility
+                    draw.line(pixel_coords, fill=outline_color, width=max(outline_width, 3))
+                    drawn_count += 1
+        elif geom_type == "MultiLineString" and coords:
+            # MultiLineString: [[[lon, lat], ...], ...]
+            for line in coords:
+                if line and len(line) >= 2:
+                    pixel_coords = coords_to_pixels(line, bbox, image_size)
+                    if len(pixel_coords) >= 2:
+                        draw.line(pixel_coords, fill=outline_color, width=max(outline_width, 3))
+                        drawn_count += 1
     
     logger.info(f"Drew {drawn_count} water features")
 

@@ -36,7 +36,7 @@ from .models import (
     PlotAnalysis, GeoJSONPoint, GeoJSONPolygon, GeoJSONLineString,
     Boundaries, PropertyLine, SetbackLine, BuildableEnvelope, SetbacksApplied,
     SurroundingContext, NeighborBuilding, TreeZones, Road, ElevationMap, 
-    ElevationSample, WaterFeatures, NearestWaterBody,
+    ElevationSample, DEMReference, WaterFeatures, NearestWaterBody,
     Analysis, ShadowAnalysis, FacadeScore, ShadowHoursPerDay, SunPathParams, AdjacencyEdge,
     Access, PrimaryAccessPoint, VehicleAccess, PedestrianAccess,
     ExistingStructure, Regulatory, Zoning, BuildingConstraints, SetbacksM,
@@ -488,7 +488,7 @@ class PlotAnalysisPipeline:
                 
                 setback_result = {
                     "coordinates": [setback_line_obj.coordinates],
-                    "area_sqm": setback_line_obj.area_sqm,
+                    "area_sqm": round(setback_line_obj.area_sqm, 1),
                     "setbacks_applied": {
                         "front_m": front_setback,
                         "rear_m": rear_setback,
@@ -503,7 +503,7 @@ class PlotAnalysisPipeline:
             if buildable_envelope_obj:
                 buildable_result = {
                     "coordinates": [buildable_envelope_obj.coordinates],
-                    "area_sqm": buildable_envelope_obj.area_sqm,
+                    "area_sqm": round(buildable_envelope_obj.area_sqm, 1),
                     "constraints_applied": []
                 }
                 logger.info(f"Buildable envelope calculated: {buildable_envelope_obj.area_sqm:.2f} m²")
@@ -910,7 +910,7 @@ class PlotAnalysisPipeline:
         
         setback_line = SetbackLine(
             coordinates=setback_coords_formatted,
-            area_sqm=setback_area,
+            area_sqm=round(setback_area, 1),
             setbacks_applied=SetbacksApplied(
                 front_m=setbacks_applied.get("front_m", self.config.uk_regulatory.front_setback_m),
                 rear_m=setbacks_applied.get("rear_m", self.config.uk_regulatory.rear_setback_m),
@@ -1000,7 +1000,7 @@ class PlotAnalysisPipeline:
         
         buildable_envelope = BuildableEnvelope(
             coordinates=buildable_coords_formatted,
-            area_sqm=buildable_area,
+            area_sqm=round(buildable_area, 1),
             constraints_applied=[
                 ConstraintApplied(
                     type=c.get("type", "unknown"),
@@ -1274,12 +1274,22 @@ class PlotAnalysisPipeline:
             ) for s in elevation_data.get("corner_samples", [])
         ]
         
+        dem_ref_data = elevation_data.get("dem_reference")
+        dem_reference = None
+        if dem_ref_data:
+            dem_reference = DEMReference(
+                source=dem_ref_data.get("source", "unknown"),
+                resolution_m=dem_ref_data.get("resolution_m", 90.0),
+                file_path=dem_ref_data.get("file_path")
+            )
+        
         elevation_map = ElevationMap(
             corner_samples=corner_samples,
             slope_percent=elevation_data.get("slope_percent", 0),
             slope_direction=elevation_data.get("slope_direction", "flat"),
             average_elevation_m=elevation_data.get("average_elevation_m", 0),
-            terrain_classification=elevation_data.get("terrain_classification", "flat")
+            terrain_classification=elevation_data.get("terrain_classification", "flat"),
+            dem_reference=dem_reference
         )
         
         # Water features - include ALL water features that intersect the 60m context box
@@ -1402,7 +1412,8 @@ class PlotAnalysisPipeline:
             nearest_water_body=nearest_water,
             features=[{
                 "id": w.get("id"),
-                "type": w.get("type")
+                "type": w.get("type"),
+                "geometry": w.get("geometry")  # Include geometry for visualization
             } for w in water_features_filtered]  # Include ALL filtered water features, no limit
         )
         

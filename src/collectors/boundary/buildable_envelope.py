@@ -115,8 +115,8 @@ class BuildableEnvelopeProcessor:
                 
                 return BuildableEnvelope(
                     coordinates=setback_coords,
-                    area_sqm=setback_area,
-                    perimeter_m=perimeter_m,
+                    area_sqm=round(setback_area, 1),
+                    perimeter_m=round(perimeter_m, 1),
                     metadata={
                         "derived_from": "setback_line",
                         "type": "rectangle_direct",
@@ -256,8 +256,8 @@ class BuildableEnvelopeProcessor:
             
             return BuildableEnvelope(
                 coordinates=rect_coords,
-                area_sqm=area,
-                perimeter_m=perimeter,
+                area_sqm=round(area, 1),
+                perimeter_m=round(perimeter, 1),
                 metadata={
                     "type": "maximum_inscribed_rectangle",
                     "setback_area_sqm": setback_line.area_sqm if setback_line else None

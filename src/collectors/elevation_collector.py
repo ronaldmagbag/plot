@@ -38,13 +38,21 @@ class ElevationCollector:
         Get elevation for a single point
         Returns elevation in meters or None if failed
         """
+        logger.debug(f"Fetching elevation for single point ({lat:.6f}, {lon:.6f})")
         # Try Open-Meteo first (more reliable)
         elevation = self._get_elevation_open_meteo(lat, lon)
         if elevation is not None:
+            logger.info(f"✓ Open-Meteo elevation at ({lat:.6f}, {lon:.6f}): {elevation}m")
             return elevation
         
         # Fallback to Open-Elevation
-        return self._get_elevation_open_elevation(lat, lon)
+        logger.debug(f"Open-Meteo failed, trying Open-Elevation for ({lat:.6f}, {lon:.6f})")
+        elevation = self._get_elevation_open_elevation(lat, lon)
+        if elevation is not None:
+            logger.info(f"✓ Open-Elevation at ({lat:.6f}, {lon:.6f}): {elevation}m")
+        else:
+            logger.warning(f"✗ Failed to get elevation for ({lat:.6f}, {lon:.6f}) from both APIs")
+        return elevation
     
     def get_elevation_multi(self, points: List[Tuple[float, float]]) -> List[Optional[float]]:
         """
@@ -55,12 +63,19 @@ class ElevationCollector:
         if not points:
             return []
         
+        logger.info(f"Fetching elevation for {len(points)} points using Open-Meteo batch API")
         # Try batch request with Open-Meteo
         elevations = self._get_elevation_open_meteo_batch(points)
         if elevations and any(e is not None for e in elevations):
+            success_count = sum(1 for e in elevations if e is not None)
+            logger.info(f"✓ Open-Meteo batch: {success_count}/{len(points)} points succeeded")
+            if success_count < len(points):
+                failed_indices = [i for i, e in enumerate(elevations) if e is None]
+                logger.warning(f"  Failed points: {failed_indices}")
             return elevations
         
         # Fallback to individual requests
+        logger.warning(f"Open-Meteo batch failed, falling back to individual requests (Open-Meteo → Open-Elevation)")
         return [self.get_elevation_single(lat, lon) for lat, lon in points]
     
     def _get_elevation_open_meteo(self, lat: float, lon: float) -> Optional[float]:
@@ -68,6 +83,7 @@ class ElevationCollector:
         self._rate_limit()
         
         try:
+            logger.debug(f"Requesting Open-Meteo API: ({lat:.6f}, {lon:.6f})")
             response = requests.get(
                 self.open_meteo_url,
                 params={"latitude": lat, "longitude": lon},
@@ -79,10 +95,14 @@ class ElevationCollector:
             
             elevation = data.get("elevation", [None])[0]
             if elevation is not None:
-                logger.debug(f"Open-Meteo elevation at ({lat}, {lon}): {elevation}m")
+                logger.debug(f"Open-Meteo API response: {elevation}m")
                 return float(elevation)
+            else:
+                logger.debug(f"Open-Meteo API returned no elevation data")
+        except requests.exceptions.RequestException as e:
+            logger.debug(f"Open-Meteo API request error: {type(e).__name__}: {e}")
         except Exception as e:
-            logger.warning(f"Open-Meteo elevation request failed: {e}")
+            logger.debug(f"Open-Meteo API unexpected error: {type(e).__name__}: {e}")
         
         return None
     
@@ -98,6 +118,7 @@ class ElevationCollector:
         lons = ",".join([str(p[1]) for p in points])
         
         try:
+            logger.debug(f"Requesting Open-Meteo batch API for {len(points)} points")
             response = requests.get(
                 self.open_meteo_url,
                 params={"latitude": lats, "longitude": lons},
@@ -109,10 +130,15 @@ class ElevationCollector:
             
             elevations = data.get("elevation", [])
             if isinstance(elevations, list) and len(elevations) == len(points):
-                logger.debug(f"Open-Meteo batch elevation: {elevations}")
-                return [float(e) if e is not None else None for e in elevations]
+                elevations_float = [float(e) if e is not None else None for e in elevations]
+                logger.debug(f"Open-Meteo batch API response: {elevations_float}")
+                return elevations_float
+            else:
+                logger.warning(f"Open-Meteo batch API returned {len(elevations)} elevations, expected {len(points)}")
+        except requests.exceptions.RequestException as e:
+            logger.debug(f"Open-Meteo batch API request error: {type(e).__name__}: {e}")
         except Exception as e:
-            logger.warning(f"Open-Meteo batch elevation request failed: {e}")
+            logger.debug(f"Open-Meteo batch API unexpected error: {type(e).__name__}: {e}")
         
         return [None] * len(points)
     
@@ -121,6 +147,7 @@ class ElevationCollector:
         self._rate_limit()
         
         try:
+            logger.debug(f"Requesting Open-Elevation API: ({lat:.6f}, {lon:.6f})")
             # Open-Elevation API format
             response = requests.get(
                 self.open_elevation_url,
@@ -134,10 +161,14 @@ class ElevationCollector:
             results = data.get("results", [])
             if results and "elevation" in results[0]:
                 elevation = results[0]["elevation"]
-                logger.debug(f"Open-Elevation at ({lat}, {lon}): {elevation}m")
+                logger.debug(f"Open-Elevation API response: {elevation}m")
                 return float(elevation)
+            else:
+                logger.debug(f"Open-Elevation API returned no elevation data")
+        except requests.exceptions.RequestException as e:
+            logger.debug(f"Open-Elevation API request error: {type(e).__name__}: {e}")
         except Exception as e:
-            logger.warning(f"Open-Elevation request failed: {e}")
+            logger.debug(f"Open-Elevation API unexpected error: {type(e).__name__}: {e}")
         
         return None
     
@@ -172,21 +203,30 @@ class ElevationCollector:
         # Also get center elevation
         all_points = corners + [(center_lat, center_lon)]
         
-        logger.info(f"Fetching elevation for {len(all_points)} points around ({center_lat}, {center_lon})")
+        logger.info(f"Fetching elevation for {len(all_points)} points around ({center_lat:.6f}, {center_lon:.6f})")
+        logger.info(f"  Area: {width_m:.1f}m × {height_m:.1f}m")
         elevations = self.get_elevation_multi(all_points)
         
         # Process results
         corner_samples = []
         corner_labels = ["SW", "SE", "NE", "NW"]
         
+        logger.info("Elevation results:")
         for i, (corner, elev) in enumerate(zip(corners, elevations[:4])):
+            elevation_value = elev if elev is not None else 0.0
+            status = "✓" if elev is not None else "✗ (using 0.0)"
+            logger.info(f"  {corner_labels[i]}: {elevation_value}m {status}")
             corner_samples.append({
                 "point": [corner[1], corner[0]],  # [lon, lat]
-                "elevation_m": elev if elev is not None else 0.0,
+                "elevation_m": elevation_value,
                 "label": corner_labels[i]
             })
         
         center_elevation = elevations[4] if len(elevations) > 4 else None
+        if center_elevation is not None:
+            logger.info(f"  Center: {center_elevation}m ✓")
+        else:
+            logger.warning(f"  Center: failed to get elevation")
         
         # Calculate slope and direction
         slope_info = self._calculate_slope(corner_samples, width_m, height_m)

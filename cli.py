@@ -459,15 +459,48 @@ def cmd_visualize(args):
     water_features = water_data.get("features", [])
     for wf in water_features:
         geom = wf.get("geometry", {})
-        if geom.get("type") == "Polygon":
-            w_coords = geom.get("coordinates", [[]])[0]
+        geom_type = geom.get("type", "")
+        coords = geom.get("coordinates", [])
+        
+        if geom_type == "Polygon" and coords:
+            # Polygon coordinates: [[[lon, lat], ...]]
+            w_coords = coords[0] if isinstance(coords[0][0], list) else coords
             if w_coords:
                 local_w = to_local(w_coords)
                 # Only show water features that intersect the view bounding box
                 if polygon_intersects_bbox(local_w, VIEW_BBOX):
                     poly = MplPolygon(local_w, fill=True, facecolor='lightblue', alpha=0.5, 
-                                     edgecolor='steelblue', linewidth=1)
+                                     edgecolor='steelblue', linewidth=1, zorder=1)
                     ax.add_patch(poly)
+        elif geom_type == "MultiPolygon" and coords:
+            # MultiPolygon: [[[[lon, lat], ...], ...]]
+            for polygon in coords:
+                if polygon and len(polygon) > 0:
+                    w_coords = polygon[0] if isinstance(polygon[0][0], list) else polygon
+                    if w_coords:
+                        local_w = to_local(w_coords)
+                        if polygon_intersects_bbox(local_w, VIEW_BBOX):
+                            poly = MplPolygon(local_w, fill=True, facecolor='lightblue', alpha=0.5, 
+                                             edgecolor='steelblue', linewidth=1, zorder=1)
+                            ax.add_patch(poly)
+        elif geom_type == "LineString" and coords:
+            # LineString coordinates: [[lon, lat], [lon, lat], ...]
+            if len(coords) >= 2:
+                local_w = to_local(coords)
+                # Clip line to view box
+                clipped_line = clip_line_to_bbox(local_w, VIEW_BBOX)
+                if len(clipped_line) >= 2:
+                    xs, ys = zip(*clipped_line)
+                    ax.plot(xs, ys, color='steelblue', linewidth=3, alpha=0.7, zorder=1, solid_capstyle='round')
+        elif geom_type == "MultiLineString" and coords:
+            # MultiLineString: [[[lon, lat], ...], ...]
+            for line in coords:
+                if line and len(line) >= 2:
+                    local_w = to_local(line)
+                    clipped_line = clip_line_to_bbox(local_w, VIEW_BBOX)
+                    if len(clipped_line) >= 2:
+                        xs, ys = zip(*clipped_line)
+                        ax.plot(xs, ys, color='steelblue', linewidth=3, alpha=0.7, zorder=1, solid_capstyle='round')
     
     # ============================================================
     # LAYER 2: Tree zones as CIRCLES (canopy areas) - CLIPPED to view box

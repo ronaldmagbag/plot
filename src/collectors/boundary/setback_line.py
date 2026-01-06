@@ -110,8 +110,8 @@ class SetbackLineProcessor:
             
             return SetbackLine(
                 coordinates=setback_coords,
-                area_sqm=area,
-                perimeter_m=perimeter,
+                area_sqm=round(area, 1),
+                perimeter_m=round(perimeter, 1),
                 setback_type="full",
                 metadata={
                     "front_setback_m": self.front_setback_m,
