@@ -229,7 +229,7 @@ class GeometryUtils:
             center: Optional polygon center. If not provided, will be calculated.
         
         Returns list of edges with start, end, length, and direction
-        Direction is determined relative to polygon center, not edge bearing.
+        Direction is determined by perpendicular line from centroid to edge.
         """
         if len(coords) < 2:
             return []
@@ -254,24 +254,27 @@ class GeometryUtils:
             dy = end[1] - start[1]
             length = math.sqrt(dx*dx + dy*dy)
             
-            # Calculate edge midpoint
-            midpoint = ((start[0] + end[0]) / 2, (start[1] + end[1]) / 2)
+            # Find closest point on edge to center (perpendicular line)
+            closest_point = GeometryUtils.closest_point_on_line(center, start, end)
             
-            # Calculate direction from center to edge midpoint
-            # This determines which side of the polygon the edge is on
-            center_to_midpoint_dx = midpoint[0] - center[0]
-            center_to_midpoint_dy = midpoint[1] - center[1]
+            # Calculate direction of perpendicular line from center to edge
+            # This is the direction of the property edge
+            perp_dx = closest_point[0] - center[0]
+            perp_dy = closest_point[1] - center[1]
             
-            # Calculate bearing from center to midpoint
-            if abs(center_to_midpoint_dx) < 1e-10 and abs(center_to_midpoint_dy) < 1e-10:
-                # Edge midpoint is at center (shouldn't happen, but handle it)
-                angle = 0
-            else:
-                angle = math.degrees(math.atan2(center_to_midpoint_dx, center_to_midpoint_dy))
-                if angle < 0:
-                    angle += 360
+            # Calculate angle of perpendicular line
+            if abs(perp_dx) < 1e-10 and abs(perp_dy) < 1e-10:
+                # Center is on the edge (shouldn't happen, but handle it)
+                # Fallback to edge midpoint
+                midpoint = ((start[0] + end[0]) / 2, (start[1] + end[1]) / 2)
+                perp_dx = midpoint[0] - center[0]
+                perp_dy = midpoint[1] - center[1]
             
-            # Determine cardinal direction based on position relative to center
+            angle = math.degrees(math.atan2(perp_dx, perp_dy))
+            if angle < 0:
+                angle += 360
+            
+            # Determine cardinal direction based on perpendicular line direction
             direction = GeometryUtils._angle_to_direction(angle)
             
             # Also calculate edge bearing for reference
@@ -287,7 +290,7 @@ class GeometryUtils:
                 "end": end,
                 "length_m": length,
                 "bearing": edge_bearing,
-                "direction": direction  # Direction relative to center
+                "direction": direction  # Direction of perpendicular from center to edge
             })
         
         return edges
@@ -338,6 +341,38 @@ class GeometryUtils:
         closest_y = y1 + t * dy
         
         return math.sqrt((px - closest_x)**2 + (py - closest_y)**2)
+    
+    @staticmethod
+    def closest_point_on_line(
+        point: Tuple[float, float],
+        line_start: Tuple[float, float],
+        line_end: Tuple[float, float]
+    ) -> Tuple[float, float]:
+        """
+        Find the closest point on a line segment to a given point
+        
+        Returns:
+            (x, y) tuple of the closest point on the line segment
+        """
+        px, py = point
+        x1, y1 = line_start
+        x2, y2 = line_end
+        
+        dx = x2 - x1
+        dy = y2 - y1
+        
+        if dx == 0 and dy == 0:
+            # Line is a point
+            return (x1, y1)
+        
+        # Parameter t for closest point on line
+        t = max(0, min(1, ((px - x1) * dx + (py - y1) * dy) / (dx*dx + dy*dy)))
+        
+        # Closest point
+        closest_x = x1 + t * dx
+        closest_y = y1 + t * dy
+        
+        return (closest_x, closest_y)
     
     @staticmethod
     def distance_line_to_polygon(
@@ -469,4 +504,79 @@ class GeometryUtils:
                 min_dist = min(min_dist, dist)
         
         return min_dist
+    
+    @staticmethod
+    def closest_points_between_polygons(
+        poly1: List[Tuple[float, float]],
+        poly2: List[Tuple[float, float]]
+    ) -> Tuple[Tuple[float, float], Tuple[float, float], float]:
+        """
+        Find the closest points between two polygons
+        
+        Args:
+            poly1: First polygon vertices (x, y)
+            poly2: Second polygon vertices (x, y)
+        
+        Returns:
+            Tuple of (point_on_poly1, point_on_poly2, distance)
+        """
+        min_dist = float('inf')
+        closest_p1 = None
+        closest_p2 = None
+        
+        # Check all edges of poly1 against all edges of poly2
+        n1 = len(poly1)
+        n2 = len(poly2)
+        
+        for i in range(n1):
+            j1 = (i + 1) % n1
+            edge1_start = poly1[i]
+            edge1_end = poly1[j1]
+            
+            for k in range(n2):
+                j2 = (k + 1) % n2
+                edge2_start = poly2[k]
+                edge2_end = poly2[j2]
+                
+                # Find closest points between these two edges
+                # Check each vertex of edge2 against edge1
+                for pt in [edge2_start, edge2_end]:
+                    closest_on_edge1 = GeometryUtils.closest_point_on_line(
+                        pt, edge1_start, edge1_end
+                    )
+                    dist = math.sqrt(
+                        (pt[0] - closest_on_edge1[0])**2 + 
+                        (pt[1] - closest_on_edge1[1])**2
+                    )
+                    if dist < min_dist:
+                        min_dist = dist
+                        closest_p1 = closest_on_edge1
+                        closest_p2 = pt
+                
+                # Check each vertex of edge1 against edge2
+                for pt in [edge1_start, edge1_end]:
+                    closest_on_edge2 = GeometryUtils.closest_point_on_line(
+                        pt, edge2_start, edge2_end
+                    )
+                    dist = math.sqrt(
+                        (pt[0] - closest_on_edge2[0])**2 + 
+                        (pt[1] - closest_on_edge2[1])**2
+                    )
+                    if dist < min_dist:
+                        min_dist = dist
+                        closest_p1 = pt
+                        closest_p2 = closest_on_edge2
+        
+        # Fallback if no closest points found
+        if closest_p1 is None or closest_p2 is None:
+            centroid1 = GeometryUtils.polygon_centroid([list(p) for p in poly1])
+            centroid2 = GeometryUtils.polygon_centroid([list(p) for p in poly2])
+            closest_p1 = (centroid1[0], centroid1[1])
+            closest_p2 = (centroid2[0], centroid2[1])
+            min_dist = math.sqrt(
+                (closest_p1[0] - closest_p2[0])**2 + 
+                (closest_p1[1] - closest_p2[1])**2
+            )
+        
+        return (closest_p1, closest_p2, min_dist)
 

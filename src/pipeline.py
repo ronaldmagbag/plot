@@ -524,8 +524,10 @@ class PlotAnalysisPipeline:
             )
             # Note: access_corridor will be updated after adjacency_result is calculated
         
+        # Use neighbor_buildings (excludes existing structures inside property)
+        # Existing structures should not be considered as neighbors
         adjacency_result = self.adjacency_analyzer.analyze(
-            property_coords, osm_roads, osm_buildings, water_features_raw
+            property_coords, osm_roads, neighbor_buildings, water_features_raw
         )
         
         # Calculate access corridor after adjacency analysis is available
@@ -542,8 +544,67 @@ class PlotAnalysisPipeline:
             )
             buildable_result = {"access_corridor": access_corridor_data}
         
+        # Calculate wall_facing_plot for neighbor buildings before shadow analysis
+        # This is needed for accurate direction detection in shadow angles
+        ref_lon, ref_lat = property_coords[0] if property_coords else (lon, lat)
+        local_property = GeometryUtils.degrees_to_local(property_coords, ref_lon, ref_lat)
+        
+        for building in neighbor_buildings:
+            footprint = building.get("footprint", {})
+            if not footprint.get("coordinates"):
+                continue
+            
+            b_coords = footprint["coordinates"][0]
+            local_b = GeometryUtils.degrees_to_local(b_coords, ref_lon, ref_lat)
+            
+            # Find closest points between building and property polygons
+            closest_building_pt, closest_property_pt, _ = GeometryUtils.closest_points_between_polygons(
+                local_b, local_property
+            )
+            
+            # Calculate direction of the distance line (from building to property)
+            dx = closest_property_pt[0] - closest_building_pt[0]
+            dy = closest_property_pt[1] - closest_building_pt[1]
+            
+            # Calculate angle of the distance line
+            if abs(dx) < 1e-10 and abs(dy) < 1e-10:
+                # Fallback to centroid-based
+                b_centroid = GeometryUtils.polygon_centroid(b_coords)
+                p_centroid = GeometryUtils.polygon_centroid(property_coords)
+                local_b_centroid = GeometryUtils.degrees_to_local([list(b_centroid)], ref_lon, ref_lat)[0]
+                local_p_centroid = GeometryUtils.degrees_to_local([list(p_centroid)], ref_lon, ref_lat)[0]
+                dx = local_p_centroid[0] - local_b_centroid[0]
+                dy = local_p_centroid[1] - local_b_centroid[1]
+            
+            angle = math.degrees(math.atan2(dx, dy))
+            if angle < 0:
+                angle += 360
+            
+            # Convert angle to cardinal direction
+            if angle < 22.5 or angle >= 337.5:
+                wall_facing = "north"
+            elif angle < 67.5:
+                wall_facing = "north"
+            elif angle < 112.5:
+                wall_facing = "east"
+            elif angle < 157.5:
+                wall_facing = "east"
+            elif angle < 202.5:
+                wall_facing = "south"
+            elif angle < 247.5:
+                wall_facing = "south"
+            elif angle < 292.5:
+                wall_facing = "west"
+            else:
+                wall_facing = "west"
+            
+            # Add wall_facing_plot to building dict for shadow analyzer
+            building["wall_facing_plot"] = wall_facing
+        
+        # Use neighbor_buildings (excludes existing structures inside property)
+        # Now includes wall_facing_plot for each building
         shadow_result = self.shadow_analyzer.analyze(
-            (lon, lat), property_coords, osm_buildings
+            (lon, lat), property_coords, neighbor_buildings
         )
         
         logger.info("Stage 4: Building output model...")
@@ -1048,19 +1109,84 @@ class PlotAnalysisPipeline:
             # Calculate MINIMUM distance from building polygon to property polygon
             distance = GeometryUtils.distance_polygon_to_polygon(local_b, local_property)
             
-            # Get building centroid for wall facing calculation
-            b_centroid = GeometryUtils.polygon_centroid(b_coords)
-            p_centroid = GeometryUtils.polygon_centroid(property_coords)
-            local_b_centroid = GeometryUtils.degrees_to_local([list(b_centroid)], ref_lon, ref_lat)[0]
-            local_p_centroid = GeometryUtils.degrees_to_local([list(p_centroid)], ref_lon, ref_lat)[0]
+            # Determine wall facing plot by finding closest building edge to plot
+            # Algorithm:
+            # 1. Get all building edges with their directions (relative to building center)
+            # 2. Find the edge with minimum distance to plot polygon
+            # 3. The edge direction indicates which wall of the building faces the plot
+            #
+            # Edge direction angle ranges (from building center to edge midpoint):
+            # - North: 337.5°-22.5° (or -22.5° to 22.5°)
+            # - East: 67.5°-112.5°
+            # - South: 157.5°-202.5°
+            # - West: 247.5°-292.5°
+            # Diagonal directions (northeast, southeast, etc.) are handled by primary component
             
-            # Determine wall facing plot
-            dx = local_b_centroid[0] - local_p_centroid[0]
-            dy = local_b_centroid[1] - local_p_centroid[1]
-            if abs(dx) > abs(dy):
-                wall_facing = "west" if dx > 0 else "east"
+            building_center = GeometryUtils.polygon_centroid(local_b)
+            building_edges = GeometryUtils.get_polygon_edges(local_b, center=building_center)
+            
+            # Find the closest building edge to the plot polygon
+            min_edge_distance = float('inf')
+            closest_edge = None
+            
+            for edge in building_edges:
+                # Calculate minimum distance from this edge to plot polygon
+                edge_dist = GeometryUtils.distance_line_to_polygon(
+                    edge["start"], edge["end"], local_property
+                )
+                if edge_dist < min_edge_distance:
+                    min_edge_distance = edge_dist
+                    closest_edge = edge
+            
+            # Determine wall_facing_plot using minimum distance line from building to property line
+            # Algorithm: Find closest points between building polygon and property polygon,
+            # then calculate direction of the distance line
+            closest_building_pt, closest_property_pt, min_line_distance = GeometryUtils.closest_points_between_polygons(
+                local_b, local_property
+            )
+            
+            # Calculate direction of the distance line (from building to property)
+            # This tells us which wall of the building faces the plot
+            dx = closest_property_pt[0] - closest_building_pt[0]  # Property X - Building X
+            dy = closest_property_pt[1] - closest_building_pt[1]  # Property Y - Building Y
+            
+            # Calculate angle of the distance line
+            if abs(dx) < 1e-10 and abs(dy) < 1e-10:
+                # Points are the same (shouldn't happen, but handle it)
+                # Fallback to centroid-based
+                b_centroid = GeometryUtils.polygon_centroid(b_coords)
+                p_centroid = GeometryUtils.polygon_centroid(property_coords)
+                local_b_centroid = GeometryUtils.degrees_to_local([list(b_centroid)], ref_lon, ref_lat)[0]
+                local_p_centroid = GeometryUtils.degrees_to_local([list(p_centroid)], ref_lon, ref_lat)[0]
+                dx = local_p_centroid[0] - local_b_centroid[0]
+                dy = local_p_centroid[1] - local_b_centroid[1]
+            
+            angle = math.degrees(math.atan2(dx, dy))
+            if angle < 0:
+                angle += 360
+            
+            # Convert angle to cardinal direction
+            # This tells us which wall of the building faces the plot
+            if angle < 22.5 or angle >= 337.5:
+                wall_facing = "north"  # Distance line points north → building's north wall faces plot
+            elif angle < 67.5:
+                wall_facing = "north"  # Northeast → use primary: north
+            elif angle < 112.5:
+                wall_facing = "east"  # Distance line points east → building's east wall faces plot
+            elif angle < 157.5:
+                wall_facing = "east"  # Southeast → use primary: east
+            elif angle < 202.5:
+                wall_facing = "south"  # Distance line points south → building's south wall faces plot
+            elif angle < 247.5:
+                wall_facing = "south"  # Southwest → use primary: south
+            elif angle < 292.5:
+                wall_facing = "west"  # Distance line points west → building's west wall faces plot
             else:
-                wall_facing = "south" if dy > 0 else "north"
+                wall_facing = "west"  # Northwest → use primary: west
+            
+            logger.debug(f"  Building {b.get('id', 'unknown')}: closest_building_pt=({closest_building_pt[0]:.1f}, {closest_building_pt[1]:.1f}), "
+                        f"closest_property_pt=({closest_property_pt[0]:.1f}, {closest_property_pt[1]:.1f}), "
+                        f"dx={dx:.1f}, dy={dy:.1f}, angle={angle:.1f}° → wall_facing={wall_facing}")
             
             buildings_with_distances.append({
                 "building": b,

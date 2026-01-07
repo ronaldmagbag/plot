@@ -375,7 +375,7 @@ def draw_water_features(
                     pixel_coords = coords_to_pixels(line, bbox, image_size)
                     if len(pixel_coords) >= 2:
                         draw.line(pixel_coords, fill=outline_color, width=max(outline_width, 3))
-                        drawn_count += 1
+                            drawn_count += 1
     
     logger.info(f"Drew {drawn_count} water features")
 

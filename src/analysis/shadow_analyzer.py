@@ -53,7 +53,13 @@ class ShadowAnalyzer:
         Returns facade scores, shadow hours, and neighbor shadow angles
         """
         lon, lat = plot_centroid
-        logger.info(f"Analyzing shadows for plot at ({lat}, {lon})")
+        logger.info(f"Analyzing shadows for plot at ({lat:.6f}, {lon:.6f})")
+        logger.info(f"  Neighbor buildings: {len(neighbor_buildings)}")
+        logger.info(f"  Plot boundary points: {len(plot_boundary)}")
+        
+        # Check pvlib availability
+        pvlib_available = _check_pvlib()
+        logger.info(f"  pvlib available: {pvlib_available}")
         
         # Key dates for analysis
         analysis_dates = {
@@ -63,27 +69,40 @@ class ShadowAnalyzer:
         }
         
         # Calculate sun positions for each date
+        logger.info("Calculating sun hours for key dates...")
         shadow_hours = {}
         for period, date in analysis_dates.items():
-            shadow_hours[period] = self._calculate_sun_hours(lat, lon, date)
+            hours = self._calculate_sun_hours(lat, lon, date)
+            shadow_hours[period] = hours
+            logger.info(f"  {period} ({date.strftime('%Y-%m-%d')}): {hours:.1f} hours")
         
         # Calculate facade scores
+        logger.info("Calculating facade scores...")
         facade_scores = self._calculate_facade_scores(
             lat, lon, neighbor_buildings, plot_boundary
         )
+        logger.info(f"  Facade scores calculated: {len(facade_scores)} facades")
+        for facade, scores in facade_scores.items():
+            logger.info(f"    {facade}: winter={scores['winter_avg']:.2f}, summer={scores['summer_avg']:.2f}, annual={scores['annual_avg']:.2f}")
         
         # Calculate neighbor shadow angles
+        logger.info("Calculating neighbor shadow angles...")
         neighbor_angles = self._calculate_neighbor_shadow_angles(
             plot_centroid, plot_boundary, neighbor_buildings
         )
+        logger.info(f"  Neighbor shadow angles: {len(neighbor_angles)} directions")
+        for direction, angle in neighbor_angles.items():
+            logger.info(f"    {direction}: {angle:.0f}°")
         
         # Determine best solar facade
         best_facade = max(
             facade_scores.keys(),
             key=lambda f: facade_scores[f]["annual_avg"]
         )
+        best_score = facade_scores[best_facade]["annual_avg"]
+        logger.info(f"  Best solar facade: {best_facade} (score: {best_score:.2f})")
         
-        return {
+        result = {
             "facade_scores": facade_scores,
             "shadow_hours_per_day": shadow_hours,
             "neighbor_shadow_angles": neighbor_angles,
@@ -95,6 +114,9 @@ class ShadowAnalyzer:
                 "timezone": self.timezone
             }
         }
+        
+        logger.info(f"Shadow analysis complete. Returning {len(result)} result keys")
+        return result
     
     def _calculate_sun_hours(
         self,
@@ -104,8 +126,10 @@ class ShadowAnalyzer:
     ) -> float:
         """Calculate approximate sun hours for a given date"""
         if _check_pvlib():
+            logger.debug(f"Using pvlib for sun hours calculation ({date.strftime('%Y-%m-%d')})")
             return self._calculate_sun_hours_pvlib(lat, lon, date)
         else:
+            logger.debug(f"Using simplified calculation for sun hours ({date.strftime('%Y-%m-%d')})")
             return self._calculate_sun_hours_simple(lat, date)
     
     def _calculate_sun_hours_pvlib(
@@ -124,15 +148,30 @@ class ShadowAnalyzer:
             freq='15min',
             tz=self.timezone
         )
+        logger.debug(f"  pvlib: Created time range with {len(times)} intervals (15min each)")
         
         # Get solar positions
         if not _check_pvlib() or _pvlib_module is None:
+            logger.warning("  pvlib check failed, falling back to simplified calculation")
             return self._calculate_sun_hours_simple(lat, lon, date)
+        
+        logger.debug(f"  pvlib: Calling solarposition.get_solarposition(lat={lat:.6f}, lon={lon:.6f})")
         solar_pos = _pvlib_module.solarposition.get_solarposition(times, lat, lon)
+        
+        # Log some pvlib results
+        if len(solar_pos) > 0:
+            max_elevation = solar_pos['apparent_elevation'].max()
+            min_elevation = solar_pos['apparent_elevation'].min()
+            max_azimuth = solar_pos['azimuth'].max()
+            min_azimuth = solar_pos['azimuth'].min()
+            logger.debug(f"  pvlib results: elevation range [{min_elevation:.2f}°, {max_elevation:.2f}°], "
+                        f"azimuth range [{min_azimuth:.2f}°, {max_azimuth:.2f}°]")
         
         # Count hours where sun is above horizon (elevation > 0)
         sun_above_horizon = solar_pos['apparent_elevation'] > 0
         sun_hours = sun_above_horizon.sum() * 0.25  # 15-minute intervals
+        sun_above_count = sun_above_horizon.sum()
+        logger.debug(f"  pvlib: {sun_above_count}/{len(times)} intervals above horizon = {sun_hours:.2f} hours")
         
         return round(sun_hours, 1)
     
@@ -140,9 +179,11 @@ class ShadowAnalyzer:
         """Simplified sun hours calculation without pvlib"""
         # Day of year
         doy = date.timetuple().tm_yday
+        logger.debug(f"  Simple calc: day of year = {doy}")
         
         # Solar declination angle (simplified)
         declination = 23.45 * math.sin(math.radians(360 * (284 + doy) / 365))
+        logger.debug(f"  Simple calc: declination = {declination:.2f}°")
         
         # Convert to radians
         lat_rad = math.radians(lat)
@@ -150,17 +191,22 @@ class ShadowAnalyzer:
         
         # Hour angle at sunrise/sunset
         cos_hour_angle = -math.tan(lat_rad) * math.tan(dec_rad)
+        logger.debug(f"  Simple calc: cos(hour_angle) = {cos_hour_angle:.4f}")
         
         # Handle polar day/night
         if cos_hour_angle < -1:
+            logger.debug(f"  Simple calc: polar day (24 hours)")
             return 24.0  # Midnight sun
         elif cos_hour_angle > 1:
+            logger.debug(f"  Simple calc: polar night (0 hours)")
             return 0.0   # Polar night
         
         hour_angle = math.degrees(math.acos(cos_hour_angle))
+        logger.debug(f"  Simple calc: hour_angle = {hour_angle:.2f}°")
         
         # Day length in hours
         day_length = 2 * hour_angle / 15
+        logger.debug(f"  Simple calc: day_length = {day_length:.2f} hours")
         
         return round(day_length, 1)
     
@@ -210,6 +256,7 @@ class ShadowAnalyzer:
             "east": {"winter": 0.55, "summer": 0.70},
             "west": {"winter": 0.50, "summer": 0.65}
         }
+        logger.debug(f"  Base facade scores: {base_scores}")
         
         # Adjust for neighbor obstructions
         facade_scores = {}
@@ -218,10 +265,14 @@ class ShadowAnalyzer:
             obstruction_factor = self._calculate_obstruction(
                 facade, local_boundary, neighbor_buildings, ref_lon, ref_lat
             )
+            logger.debug(f"  {facade} facade: obstruction_factor = {obstruction_factor:.3f}")
             
             winter_avg = base["winter"] * (1 - obstruction_factor * 0.5)
             summer_avg = base["summer"] * (1 - obstruction_factor * 0.3)
             annual_avg = (winter_avg + summer_avg) / 2
+            
+            logger.debug(f"  {facade} facade: base winter={base['winter']:.2f} → adjusted={winter_avg:.2f}, "
+                        f"base summer={base['summer']:.2f} → adjusted={summer_avg:.2f}, annual={annual_avg:.2f}")
             
             facade_scores[facade] = {
                 "winter_avg": round(winter_avg, 2),
@@ -229,6 +280,7 @@ class ShadowAnalyzer:
                 "annual_avg": round(annual_avg, 2)
             }
         
+        logger.debug(f"  Final facade scores: {facade_scores}")
         return facade_scores
     
     def _calculate_obstruction(
@@ -260,6 +312,9 @@ class ShadowAnalyzer:
         )
         
         max_obstruction = 0.0
+        building_count = 0
+        
+        logger.debug(f"    Calculating obstruction for {facade} facade, checking {len(neighbor_buildings)} buildings")
         
         for building in neighbor_buildings:
             # Get building footprint in local coords
@@ -285,6 +340,7 @@ class ShadowAnalyzer:
             if dot_product > 0:  # Building is in the facade direction
                 distance = math.sqrt(to_building[0]**2 + to_building[1]**2)
                 height = building.get("height_m", 8.0)
+                building_id = building.get("id", "unknown")
                 
                 if distance > 0:
                     # Calculate angular size of building
@@ -294,7 +350,12 @@ class ShadowAnalyzer:
                     # Maximum obstruction at ~25m distance for 10m building
                     obstruction = min(1.0, angle / 45.0)
                     max_obstruction = max(max_obstruction, obstruction)
+                    building_count += 1
+                    
+                    logger.debug(f"      Building {building_id}: distance={distance:.1f}m, height={height:.1f}m, "
+                                f"angle={angle:.2f}°, obstruction={obstruction:.3f}")
         
+        logger.debug(f"    {facade} facade: {building_count} buildings in direction, max_obstruction={max_obstruction:.3f}")
         return max_obstruction
     
     def _calculate_neighbor_shadow_angles(
@@ -314,6 +375,7 @@ class ShadowAnalyzer:
         plot_centroid_local = GeometryUtils.polygon_centroid(local_boundary)
         
         shadow_angles = {}
+        logger.debug(f"  Calculating shadow angles for {len(neighbor_buildings)} neighbor buildings")
         
         for building in neighbor_buildings:
             building_id = building.get("id", "unknown")
@@ -340,17 +402,41 @@ class ShadowAnalyzer:
                 # Sun angle where shadow just reaches the plot
                 shadow_angle = math.degrees(math.atan(height / min_distance))
                 
-                # Classify by direction
-                building_centroid = GeometryUtils.polygon_centroid(building_local)
-                dx = building_centroid[0] - plot_centroid_local[0]
-                dy = building_centroid[1] - plot_centroid_local[1]
+                # Classify by direction - use wall_facing_plot if available (more accurate)
+                # wall_facing_plot indicates which wall of the building faces the plot
+                # If building's east wall faces plot, building is to the west of the plot
+                wall_facing = building.get("wall_facing_plot", "")
                 
-                if abs(dy) > abs(dx):
-                    direction = "north_building" if dy > 0 else "south_building"
+                if wall_facing:
+                    # Convert wall_facing to building direction (inverted mapping)
+                    # If building's east wall faces plot → building is to the west → "west_building"
+                    # If building's west wall faces plot → building is to the east → "east_building"
+                    # If building's north wall faces plot → building is to the south → "south_building"
+                    # If building's south wall faces plot → building is to the north → "north_building"
+                    direction_map = {
+                        "north": "south_building",  # North wall faces plot → building is to the south
+                        "south": "north_building",  # South wall faces plot → building is to the north
+                        "east": "west_building",   # East wall faces plot → building is to the west
+                        "west": "east_building"    # West wall faces plot → building is to the east
+                    }
+                    direction = direction_map.get(wall_facing.lower(), None)
+                    
+                    if direction:
+                        logger.debug(f"    Building {building_id}: using wall_facing_plot='{wall_facing}' → direction={direction}")
+                        shadow_angles[direction] = round(shadow_angle, 0)
+                        logger.debug(f"    Building {building_id}: min_distance={min_distance:.1f}m, height={height:.1f}m, "
+                                    f"shadow_angle={shadow_angle:.1f}°, direction={direction}")
+                    else:
+                        # Skip building if wall_facing_plot is invalid (don't use fallback)
+                        logger.warning(f"    Building {building_id}: wall_facing_plot='{wall_facing}' is invalid, skipping shadow angle calculation")
                 else:
-                    direction = "east_building" if dx > 0 else "west_building"
-                
-                shadow_angles[direction] = round(shadow_angle, 0)
+                    # Skip building if wall_facing_plot not available (don't use fallback)
+                    logger.warning(f"    Building {building_id}: wall_facing_plot not available, skipping shadow angle calculation")
+                logger.debug(f"    Building {building_id}: min_distance={min_distance:.1f}m, height={height:.1f}m, "
+                            f"shadow_angle={shadow_angle:.1f}°, direction={direction}")
+            else:
+                logger.debug(f"    Building {building_id}: min_distance=0 (overlapping or invalid), skipping")
         
+        logger.debug(f"  Shadow angles result: {shadow_angles}")
         return shadow_angles
 
