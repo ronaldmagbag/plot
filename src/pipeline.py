@@ -37,7 +37,8 @@ from .models import (
     Boundaries, PropertyLine, SetbackLine, BuildableEnvelope, SetbacksApplied,
     SurroundingContext, NeighborBuilding, TreeZones, Road, ElevationMap, 
     ElevationSample, DEMReference, WaterFeatures, NearestWaterBody,
-    Analysis, ShadowAnalysis, FacadeScore, ShadowHoursPerDay, SunPathParams, AdjacencyEdge,
+    Analysis, ShadowAnalysis, FacadeScore, ShadowHoursPerDay, SunPathParams, 
+    AdjacencyEdge, StreetAdjacencyEdge, BuildingAdjacencyEdge, WaterAdjacencyEdge,
     Access, PrimaryAccessPoint, VehicleAccess, PedestrianAccess,
     ExistingStructure, Regulatory, Zoning, BuildingConstraints, SetbacksM,
     Soil, DataQuality, DataSource, AccessCorridor, ConstraintApplied
@@ -604,7 +605,7 @@ class PlotAnalysisPipeline:
         # Use neighbor_buildings (excludes existing structures inside property)
         # Now includes wall_facing_plot for each building
         shadow_result = self.shadow_analyzer.analyze(
-            (lon, lat), property_coords, neighbor_buildings
+            (lon, lat), property_coords, neighbor_buildings, property_line_obj=property_line_obj
         )
         
         logger.info("Stage 4: Building output model...")
@@ -1579,6 +1580,7 @@ class PlotAnalysisPipeline:
             ),
             neighbor_shadow_angles=shadow_result.get("neighbor_shadow_angles", {}),
             best_solar_facade=shadow_result.get("best_solar_facade", "south"),
+            sunlight_score=shadow_result.get("sunlight_score", 0.5),
             computed_at=shadow_result.get("computed_at", datetime.utcnow().isoformat()),
             sun_path_params=SunPathParams(
                 latitude=sun_params.get("latitude", 51.5),
@@ -1591,21 +1593,39 @@ class PlotAnalysisPipeline:
         adjacency_edges = []
         for edge in adjacency_result:
             geom = edge.get("geometry", {})
+            adjacent_to = edge.get("adjacent_to", "unknown")
             
-            adjacency_edges.append(AdjacencyEdge(
-                edge_id=edge.get("edge_id", "unknown"),
-                geometry=GeoJSONLineString(coordinates=geom.get("coordinates", [])),
-                length_m=edge.get("length_m", 0),
-                adjacent_to=edge.get("adjacent_to", "unknown"),
-                street_name=edge.get("street_name"),
-                street_type=edge.get("street_type"),
-                neighbor_id=edge.get("neighbor_id"),
-                primary_access=edge.get("primary_access", False),
-                shared_wall_potential=edge.get("shared_wall_potential", False),
-                distance_to_neighbor_building_m=edge.get("distance_to_neighbor_building_m"),
-                noise_level=edge.get("noise_level", "low"),
-                privacy_exposure=edge.get("privacy_exposure", "low")
-            ))
+            # Create appropriate edge type based on adjacent_to
+            if adjacent_to == "street":
+                adjacency_edges.append(StreetAdjacencyEdge(
+                    edge_id=edge.get("edge_id", "unknown"),
+                    geometry=GeoJSONLineString(coordinates=geom.get("coordinates", [])),
+                    length_m=edge.get("length_m", 0),
+                    street_name=edge.get("street_name", "Unknown Road"),
+                    street_type=edge.get("street_type", "residential"),
+                    primary_access=edge.get("primary_access", False),
+                    noise_level=edge.get("noise_level", "low"),
+                    privacy_exposure=edge.get("privacy_exposure", "low")
+                ))
+            elif adjacent_to == "water_boundary":
+                adjacency_edges.append(WaterAdjacencyEdge(
+                    edge_id=edge.get("edge_id", "unknown"),
+                    geometry=GeoJSONLineString(coordinates=geom.get("coordinates", [])),
+                    length_m=edge.get("length_m", 0),
+                    water_type=edge.get("water_type", "unknown"),
+                    noise_level=edge.get("noise_level", "low"),
+                    privacy_exposure=edge.get("privacy_exposure", "medium")
+                ))
+            else:  # neighbor_parcel or unknown
+                adjacency_edges.append(BuildingAdjacencyEdge(
+                    edge_id=edge.get("edge_id", "unknown"),
+                    geometry=GeoJSONLineString(coordinates=geom.get("coordinates", [])),
+                    length_m=edge.get("length_m", 0),
+                    neighbor_id=edge.get("neighbor_id"),
+                    shared_wall_potential=edge.get("shared_wall_potential", False),
+                    distance_to_neighbor_building_m=edge.get("distance_to_neighbor_building_m"),
+                    privacy_exposure=edge.get("privacy_exposure", "low")
+                ))
         
         return Analysis(
             shadow_analysis=shadow_analysis,

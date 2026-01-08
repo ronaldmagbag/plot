@@ -4,8 +4,8 @@ Matches the exact JSON schema from documentation
 """
 
 from datetime import datetime
-from typing import List, Optional, Dict, Any, Literal
-from pydantic import BaseModel, Field, field_serializer
+from typing import List, Optional, Dict, Any, Literal, Union
+from pydantic import BaseModel, Field, field_serializer, Discriminator
 import uuid
 from dataclasses import asdict
 
@@ -182,23 +182,46 @@ class ShadowAnalysis(BaseModel):
     shadow_hours_per_day: ShadowHoursPerDay
     neighbor_shadow_angles: Dict[str, float]
     best_solar_facade: str
+    sunlight_score: float = Field(ge=0.0, le=1.0, description="Overall sunlight score (0-1) combining building direction and neighbor shadows")
     computed_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
     sun_path_params: SunPathParams
 
 
-class AdjacencyEdge(BaseModel):
+class AdjacencyEdgeBase(BaseModel):
+    """Base class for adjacency edges with common fields"""
     edge_id: str
     geometry: GeoJSONLineString
     length_m: float
     adjacent_to: str
-    street_name: Optional[str] = None
-    street_type: Optional[str] = None
-    neighbor_id: Optional[str] = None
+    privacy_exposure: str = "low"
+
+
+class StreetAdjacencyEdge(AdjacencyEdgeBase):
+    """Adjacency edge adjacent to a street"""
+    adjacent_to: Literal["street"] = "street"
+    street_name: str
+    street_type: str
     primary_access: bool = False
+    noise_level: str = "low"
+
+
+class BuildingAdjacencyEdge(AdjacencyEdgeBase):
+    """Adjacency edge adjacent to a neighbor building/parcel"""
+    adjacent_to: Literal["neighbor_parcel"] = "neighbor_parcel"
+    neighbor_id: Optional[str] = None
     shared_wall_potential: bool = False
     distance_to_neighbor_building_m: Optional[float] = None
+
+
+class WaterAdjacencyEdge(AdjacencyEdgeBase):
+    """Adjacency edge adjacent to water"""
+    adjacent_to: Literal["water_boundary"] = "water_boundary"
+    water_type: str = "unknown"
     noise_level: str = "low"
-    privacy_exposure: str = "low"
+
+
+# Union type for all adjacency edge types
+AdjacencyEdge = Union[StreetAdjacencyEdge, BuildingAdjacencyEdge, WaterAdjacencyEdge]
 
 
 class Analysis(BaseModel):

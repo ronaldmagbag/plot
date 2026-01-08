@@ -149,6 +149,12 @@ python scripts/draw_osm_on_mapbox.py \
     --plot-json output/plot_ash1.json \
     --output output/annotated_osm.jpg
 
+- Generate Shadow Json
+python scripts/generate_shadow_rectangles.py output/plot.json --date 2024-07-21 --time 18:00 --output output/shadows.json
 
+- Visualize Shadow Map
+python cli.py visualize -i output/plot.json -o output/plot.png -s output/my_shadows.json
 
+- Show shadow date and time info label and Neighbor Buildings count
 
+- Calculate privacy score

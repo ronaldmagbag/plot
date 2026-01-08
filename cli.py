@@ -13,6 +13,7 @@ import json
 import csv
 import argparse
 from datetime import datetime
+from pathlib import Path
 
 # Add src to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -830,6 +831,57 @@ def cmd_visualize(args):
                                     edgecolor='red', alpha=0.9))
     
     # ============================================================
+    # LAYER 4.5: Shadow rectangles (if shadow JSON provided)
+    # ============================================================
+    shadow_data = None
+    if args.shadow:
+        shadow_path = Path(args.shadow)
+        if shadow_path.exists():
+            try:
+                with open(shadow_path, 'r', encoding='utf-8') as f:
+                    shadow_data = json.load(f)
+                logger.info(f"Loaded shadow data from: {args.shadow}")
+                logger.info(f"  Timestamp: {shadow_data.get('timestamp', 'Unknown')}")
+                sun_pos = shadow_data.get('sun_position', {})
+                logger.info(f"  Sun position: azimuth={sun_pos.get('azimuth', 0):.1f}°, elevation={sun_pos.get('elevation', 0):.1f}°")
+            except Exception as e:
+                logger.warning(f"Failed to load shadow JSON: {e}")
+                shadow_data = None
+        else:
+            logger.warning(f"Shadow JSON file not found: {args.shadow}")
+    
+    if shadow_data:
+        shadow_rects = shadow_data.get("shadow_rectangles", {})
+        building_shadows = shadow_rects.get("buildings", [])
+        tree_shadows = shadow_rects.get("trees", [])
+        
+        # Draw building shadows
+        for shadow in building_shadows:
+            shadow_rect = shadow.get("shadow_rectangle", {})
+            if shadow_rect.get("type") == "Polygon":
+                coords = shadow_rect.get("coordinates", [[]])[0]
+                if coords:
+                    local_shadow = to_local(coords)
+                    # Check if shadow intersects view box
+                    if polygon_intersects_bbox(local_shadow, VIEW_BBOX):
+                        poly = MplPolygon(local_shadow, fill=True, facecolor='black', alpha=0.3,
+                                         edgecolor='darkgray', linewidth=1, linestyle='--', zorder=2)
+                        ax.add_patch(poly)
+        
+        # Draw tree shadows
+        for shadow in tree_shadows:
+            shadow_rect = shadow.get("shadow_rectangle", {})
+            if shadow_rect.get("type") == "Polygon":
+                coords = shadow_rect.get("coordinates", [[]])[0]
+                if coords:
+                    local_shadow = to_local(coords)
+                    # Check if shadow intersects view box
+                    if polygon_intersects_bbox(local_shadow, VIEW_BBOX):
+                        poly = MplPolygon(local_shadow, fill=True, facecolor='black', alpha=0.25,
+                                         edgecolor='darkgray', linewidth=1, linestyle=':', zorder=2)
+                        ax.add_patch(poly)
+    
+    # ============================================================
     # LAYER 5: Property boundary with colored segments (front/rear/sides)
     # ============================================================
     # Use simplified property line coordinates if available, otherwise use original
@@ -1101,11 +1153,11 @@ def cmd_visualize(args):
     ax.set_xlim(xlim)
     ax.set_ylim(ylim)
     
-    # Scale bar - positioned at bottom center of property area
+    # Scale bar - positioned at bottom right corner
     scale_length = 10  # 10 meters for better fit
-    # Position below property, centered
+    # Position at bottom right
     bar_y = ylim[0] + (ylim[1] - ylim[0]) * 0.08
-    bar_x = -scale_length / 2  # Center it horizontally
+    bar_x = xlim[1] - (xlim[1] - xlim[0]) * 0.15  # Right side, with margin
     
     # Draw scale bar with end caps
     ax.plot([bar_x, bar_x + scale_length], [bar_y, bar_y], 'k-', linewidth=4, zorder=10)
@@ -1114,9 +1166,9 @@ def cmd_visualize(args):
     ax.annotate(f'{scale_length}m', (bar_x + scale_length/2, bar_y + 2), 
                fontsize=10, ha='center', va='bottom', fontweight='bold', zorder=10)
     
-    # North arrow - positioned at top right area
-    arrow_x = xlim[1] - (xlim[1] - xlim[0]) * 0.10
-    arrow_y = ylim[1] - (ylim[1] - ylim[0]) * 0.10
+    # North arrow - positioned at top center
+    arrow_x = (xlim[0] + xlim[1]) / 2  # Center horizontally
+    arrow_y = ylim[1] - (ylim[1] - ylim[0]) * 0.10  # Top with margin
     ax.annotate('N', (arrow_x, arrow_y + 4), fontsize=14, ha='center', fontweight='bold', 
                color='navy', zorder=10)
     ax.annotate('', xy=(arrow_x, arrow_y + 2), xytext=(arrow_x, arrow_y - 6),
@@ -1191,7 +1243,7 @@ def cmd_visualize(args):
                               label=f'Buildable Envelope ({buildable_area:.0f}m²)'))
     if buildings:
         legend_elements.append(patches.Patch(facecolor='slategray', edgecolor='darkslategray',
-                              hatch='///', alpha=0.6, label='Neighbor Buildings'))
+                              hatch='///', alpha=0.6, label=f'Neighbor Buildings ({len(buildings)})'))
     if existing:
         legend_elements.append(patches.Patch(facecolor='lightcoral', edgecolor='darkred',
                               hatch='xx', alpha=0.7, label='Existing Structures'))
@@ -1204,6 +1256,27 @@ def cmd_visualize(args):
     if water_features:
         legend_elements.append(patches.Patch(facecolor='lightblue', edgecolor='steelblue',
                               alpha=0.5, label='Water'))
+    if shadow_data:
+        shadow_rects = shadow_data.get("shadow_rectangles", {})
+        total_shadows = len(shadow_rects.get("buildings", [])) + len(shadow_rects.get("trees", []))
+        if total_shadows > 0:
+            timestamp = shadow_data.get("timestamp", "Unknown")
+            # Parse timestamp to show date and time
+            try:
+                if "T" in timestamp:
+                    date_part, time_part = timestamp.split("T")
+                    # Format: 2024-06-21T16:00:00 -> "Jun 21, 16:00"
+                    from datetime import datetime
+                    dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                    # Format as "Jun 21, 16:00"
+                    date_time_str = dt.strftime("%b %d, %H:%M")
+                else:
+                    date_time_str = timestamp
+            except:
+                date_time_str = timestamp[:16] if len(timestamp) > 16 else timestamp
+            legend_elements.append(patches.Patch(facecolor='black', edgecolor='darkgray',
+                                  alpha=0.3, linestyle='--', linewidth=1,
+                                  label=f'Shadows ({date_time_str})'))
     if access_loc:
         legend_elements.append(Line2D([0], [0], marker='^', color='w', markerfacecolor='darkorange',
                               markersize=12, markeredgecolor='red', markeredgewidth=1,
@@ -1267,6 +1340,7 @@ Examples:
     viz_parser = subparsers.add_parser("visualize", help="Visualize a plot.json file")
     viz_parser.add_argument("--input", "-i", required=True, help="Input JSON file")
     viz_parser.add_argument("--output", "-o", help="Output image file (shows window if not specified)")
+    viz_parser.add_argument("--shadow", "-s", help="Optional shadow rectangles JSON file to visualize")
     viz_parser.set_defaults(func=cmd_visualize)
     
     args = parser.parse_args()

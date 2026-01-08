@@ -149,6 +149,29 @@ class PipelineConfig:
         "shed": 2.5,
         "yes": 8.0,  # Generic building
     })
+    
+    # Shadow analysis configuration
+    # Base facade scores (solar exposure potential, 0-1 scale)
+    # These represent the base solar exposure for each facade direction in northern hemisphere
+    # Values calculated from PVGIS data (51.013, -0.105) using:
+    # - Winter: Average of 3 months with minimum E_m values
+    # - Summer: Average of 3 months with maximum E_m values
+    # - Annual: Average of all 12 months E_m values
+    # - All values normalized by overall maximum (76.53 kWh/month = South summer) so max = 1.0
+    facade_base_scores: Dict[str, Dict[str, float]] = field(default_factory=lambda: {
+        "north": {"winter": 0.052, "summer": 0.444, "annual": 0.224},  # North gets least sun
+        "south": {"winter": 0.613, "summer": 1.000, "annual": 0.830},  # South gets best sun (summer normalized to 1.0)
+        "east": {"winter": 0.177, "summer": 0.951, "annual": 0.580},   # East gets morning sun
+        "west": {"winter": 0.184, "summer": 0.984, "annual": 0.593}     # West gets afternoon sun
+    })
+    
+    # Direction scores (window importance factor, 0-1 scale)
+    # Represents the relative importance of windows on each facade type
+    facade_direction_scores: Dict[str, float] = field(default_factory=lambda: {
+        "front": 0.9,   # Front facade has big windows
+        "rear": 0.9,   # Rear facade has big windows
+        "side": 0.4    # Side facades have small windows
+    })
 
 
 config = PipelineConfig()

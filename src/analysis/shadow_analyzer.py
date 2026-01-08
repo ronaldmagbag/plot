@@ -28,6 +28,7 @@ def _check_pvlib():
     return PVLIB_AVAILABLE
 
 from .geometry_utils import GeometryUtils
+from ..config import get_config
 
 
 class ShadowAnalyzer:
@@ -45,12 +46,19 @@ class ShadowAnalyzer:
         self,
         plot_centroid: Tuple[float, float],  # (lon, lat)
         plot_boundary: List[List[float]],
-        neighbor_buildings: List[Dict[str, Any]]
+        neighbor_buildings: List[Dict[str, Any]],
+        property_line_obj: Optional[Any] = None
     ) -> Dict[str, Any]:
         """
         Perform comprehensive shadow analysis
         
-        Returns facade scores, shadow hours, and neighbor shadow angles
+        Returns facade scores, shadow hours, neighbor shadow angles, and sunlight score
+        
+        Args:
+            plot_centroid: (lon, lat) of plot center
+            plot_boundary: List of [lon, lat] coordinates
+            neighbor_buildings: List of neighbor building dicts
+            property_line_obj: Optional PropertyLine object with front/rear/side segments
         """
         lon, lat = plot_centroid
         logger.info(f"Analyzing shadows for plot at ({lat:.6f}, {lon:.6f})")
@@ -76,7 +84,7 @@ class ShadowAnalyzer:
             shadow_hours[period] = hours
             logger.info(f"  {period} ({date.strftime('%Y-%m-%d')}): {hours:.1f} hours")
         
-        # Calculate facade scores
+        # Calculate facade scores (already accounts for neighbor shadows)
         logger.info("Calculating facade scores...")
         facade_scores = self._calculate_facade_scores(
             lat, lon, neighbor_buildings, plot_boundary
@@ -94,6 +102,13 @@ class ShadowAnalyzer:
         for direction, angle in neighbor_angles.items():
             logger.info(f"    {direction}: {angle:.0f}°")
         
+        # Calculate sunlight score (combines building direction + neighbor shadows)
+        logger.info("Calculating sunlight score...")
+        sunlight_score = self._calculate_sunlight_score(
+            plot_boundary, facade_scores, property_line_obj
+        )
+        logger.info(f"  Sunlight score: {sunlight_score:.3f}")
+        
         # Determine best solar facade
         best_facade = max(
             facade_scores.keys(),
@@ -107,6 +122,7 @@ class ShadowAnalyzer:
             "shadow_hours_per_day": shadow_hours,
             "neighbor_shadow_angles": neighbor_angles,
             "best_solar_facade": best_facade,
+            "sunlight_score": sunlight_score,
             "computed_at": datetime.utcnow().isoformat(),
             "sun_path_params": {
                 "latitude": lat,
@@ -250,13 +266,10 @@ class ShadowAnalyzer:
         
         # Calculate base scores for each facade based on latitude
         # South facade gets best sun in northern hemisphere
-        base_scores = {
-            "north": {"winter": 0.15, "summer": 0.45},
-            "south": {"winter": 0.85, "summer": 0.95},
-            "east": {"winter": 0.55, "summer": 0.70},
-            "west": {"winter": 0.50, "summer": 0.65}
-        }
-        logger.debug(f"  Base facade scores: {base_scores}")
+        # Get base scores from config
+        config = get_config()
+        base_scores = config.facade_base_scores.copy()
+        logger.debug(f"  Base facade scores (from config): {base_scores}")
         
         # Adjust for neighbor obstructions
         facade_scores = {}
@@ -282,6 +295,158 @@ class ShadowAnalyzer:
         
         logger.debug(f"  Final facade scores: {facade_scores}")
         return facade_scores
+    
+    def _calculate_sunlight_score(
+        self,
+        plot_boundary: List[List[float]],
+        facade_scores: Dict[str, Dict[str, float]],
+        property_line_obj: Optional[Any] = None
+    ) -> float:
+        """
+        Calculate overall sunlight score (0-1) for building on buildable envelope
+        
+        Factors:
+        1. Building direction: front/rear have big windows (higher score), sides have small windows (lower score)
+        2. Neighbor shadows: already accounted for in facade_scores
+        
+        Args:
+            plot_boundary: List of [lon, lat] coordinates
+            facade_scores: Dict with annual_avg scores for each facade (already includes neighbor shadow effects)
+            property_line_obj: Optional PropertyLine object with front/rear/side segments
+        
+        Returns:
+            float: Sunlight score 0.0-1.0
+        """
+        # Get direction scores from config
+        config = get_config()
+        front_rear_score = config.facade_direction_scores.get("front", 0.9)
+        side_score = config.facade_direction_scores.get("side", 0.4)
+        
+        # Default direction scores: front/rear = big windows, sides = small windows
+        # These represent the window area/importance factor
+        direction_scores = {
+            "north": side_score,  # Default: side
+            "south": side_score,  # Default: side
+            "east": side_score,   # Default: side
+            "west": side_score    # Default: side
+        }
+        
+        # If property_line_obj is available, determine which facades are front/rear vs sides
+        if property_line_obj and hasattr(property_line_obj, 'front') and property_line_obj.front:
+            logger.debug("  Determining front/rear facades from property line segments...")
+            
+            # Get front and rear edge coordinates to determine their cardinal directions
+            ref_lon, ref_lat = plot_boundary[0]
+            local_boundary = GeometryUtils.degrees_to_local(plot_boundary, ref_lon, ref_lat)
+            center_deg = GeometryUtils.polygon_centroid(plot_boundary)
+            center_local = GeometryUtils.degrees_to_local([list(center_deg)], ref_lon, ref_lat)[0]
+            
+            # Get edges with directions
+            edges = GeometryUtils.get_polygon_edges(local_boundary, center=center_local)
+            
+            # Map edge indices to directions
+            # Edges are returned in the same order as coordinates, so index i corresponds to edge i
+            edge_to_direction = {}
+            for i, edge in enumerate(edges):
+                direction = edge.get("direction", "")
+                # Facade faces opposite to edge direction
+                if "north" in direction:
+                    edge_to_direction[i] = "south"
+                elif "south" in direction:
+                    edge_to_direction[i] = "north"
+                elif "east" in direction:
+                    edge_to_direction[i] = "west"
+                elif "west" in direction:
+                    edge_to_direction[i] = "east"
+            
+            # Check front edges
+            if property_line_obj.front and hasattr(property_line_obj.front, 'edge_indices'):
+                front_indices = property_line_obj.front.edge_indices
+                for idx in front_indices:
+                    facade_dir = edge_to_direction.get(idx)
+                    if facade_dir:
+                        direction_scores[facade_dir] = front_rear_score  # Front = big windows
+                        logger.debug(f"    Front facade: {facade_dir} (score: {front_rear_score})")
+            
+            # Check rear edges
+            if property_line_obj.rear and hasattr(property_line_obj.rear, 'edge_indices'):
+                rear_indices = property_line_obj.rear.edge_indices
+                for idx in rear_indices:
+                    facade_dir = edge_to_direction.get(idx)
+                    if facade_dir:
+                        direction_scores[facade_dir] = front_rear_score  # Rear = big windows
+                        logger.debug(f"    Rear facade: {facade_dir} (score: {front_rear_score})")
+            
+            # Sides get lower score (set explicitly from config)
+            if property_line_obj.left_side and hasattr(property_line_obj.left_side, 'edge_indices'):
+                side_indices = property_line_obj.left_side.edge_indices
+                for idx in side_indices:
+                    facade_dir = edge_to_direction.get(idx)
+                    if facade_dir:
+                        direction_scores[facade_dir] = side_score  # Side = small windows
+                        logger.debug(f"    Side facade: {facade_dir} (score: {side_score})")
+            
+            if property_line_obj.right_side and hasattr(property_line_obj.right_side, 'edge_indices'):
+                side_indices = property_line_obj.right_side.edge_indices
+                for idx in side_indices:
+                    facade_dir = edge_to_direction.get(idx)
+                    if facade_dir:
+                        direction_scores[facade_dir] = side_score  # Side = small windows
+                        logger.debug(f"    Side facade: {facade_dir} (score: {side_score})")
+        else:
+            logger.debug("  No property line segments available, using default direction scores")
+        
+        # Calculate weighted sunlight score
+        # Combine direction_score (window importance) with facade_score (solar exposure + neighbor shadows)
+        # Normalize the final result to 0-1 scale based on maximum possible weighted score
+        
+        # Maximum possible annual_avg for each facade (base scores with no obstruction)
+        max_facade_scores = {
+            "north": (0.15 + 0.45) / 2,  # 0.3
+            "south": (0.85 + 0.95) / 2,  # 0.9
+            "east": (0.55 + 0.70) / 2,   # 0.625
+            "west": (0.50 + 0.65) / 2     # 0.575
+        }
+        
+        # Calculate actual weighted score
+        total_score = 0.0
+        
+        # Calculate maximum possible weighted score using ACTUAL direction_scores
+        # (not assuming all are 0.9, since only front/rear are 0.9, sides are 0.4)
+        max_total_score = 0.0
+        
+        for facade in ["north", "south", "east", "west"]:
+            if facade in facade_scores:
+                direction_score = direction_scores.get(facade, 0.5)
+                facade_score = facade_scores[facade]["annual_avg"]
+                max_facade_score = max_facade_scores.get(facade, 1.0)
+                
+                # Actual weighted score (preserves relative importance of facades)
+                weighted_score = direction_score * facade_score
+                total_score += weighted_score
+                
+                # Maximum possible weighted score using the ACTUAL direction_score for this facade
+                # This reflects the actual building orientation (front/rear vs sides)
+                max_weighted_score = direction_score * max_facade_score
+                max_total_score += max_weighted_score
+                
+                logger.debug(f"    {facade}: direction={direction_score:.2f}, facade={facade_score:.2f}, "
+                           f"weighted={weighted_score:.3f}, max_weighted={max_weighted_score:.3f}")
+        
+        # Normalize by maximum possible score to get 0-1 range
+        # This preserves the relative importance: blocking south facade hurts more than blocking north
+        # And uses the actual building orientation (front/rear/sides) for maximum calculation
+        if max_total_score > 0:
+            sunlight_score = total_score / max_total_score
+        else:
+            # Fallback: average of facade scores
+            sunlight_score = sum(f["annual_avg"] for f in facade_scores.values()) / len(facade_scores) if facade_scores else 0.5
+        
+        # Ensure score is in 0-1 range
+        sunlight_score = max(0.0, min(1.0, sunlight_score))
+        
+        logger.debug(f"  Sunlight score calculation: total_score={total_score:.3f}, max_total_score={max_total_score:.3f}, final={sunlight_score:.3f}")
+        return round(sunlight_score, 3)
     
     def _calculate_obstruction(
         self,
@@ -432,8 +597,6 @@ class ShadowAnalyzer:
                 else:
                     # Skip building if wall_facing_plot not available (don't use fallback)
                     logger.warning(f"    Building {building_id}: wall_facing_plot not available, skipping shadow angle calculation")
-                logger.debug(f"    Building {building_id}: min_distance={min_distance:.1f}m, height={height:.1f}m, "
-                            f"shadow_angle={shadow_angle:.1f}°, direction={direction}")
             else:
                 logger.debug(f"    Building {building_id}: min_distance=0 (overlapping or invalid), skipping")
         
